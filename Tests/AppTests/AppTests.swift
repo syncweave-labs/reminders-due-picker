@@ -27,7 +27,16 @@ final class Checker {
 enum AppTests {
     @MainActor
     static func main() async {
+        // EventKit re-expresses due and start components in the process time
+        // zone, and every expectation below is written for Asia/Seoul. Pin the
+        // process zone before any EventKit object exists so the tests mean the
+        // same thing on every machine; CI runners use UTC.
+        setenv("TZ", "Asia/Seoul", 1)
+        tzset()
+        NSTimeZone.resetSystemTimeZone()
+        NSTimeZone.default = TimeZone(identifier: "Asia/Seoul")!
         let check = Checker()
+        check.equal(TimeZone.current.identifier, "Asia/Seoul", "process zone pinned for EventKit")
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "Asia/Seoul")!
         calendar.locale = Locale(identifier: "ko_KR")

@@ -211,6 +211,10 @@ final class EventKitBackend: ReminderBackend {
     private var changeObserver: NSObjectProtocol?
     var onStoreChange: (() -> Void)?
 
+    /// EventKit re-expresses due and start components in the process time
+    /// zone, so the components this app builds must use the process's own
+    /// calendar. A calendar pinned to another zone would shift wall times and
+    /// even all-day dates when EventKit normalizes them.
     var calendar: Calendar { Calendar.autoupdatingCurrent }
 
     init() {
