@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+# This repository is public. Standard GitHub-hosted runners cost nothing for
+# public repositories, and the organization's self-hosted runner group does not
+# serve them, so both jobs name hosted images instead of vars.CI_RUNNER_LABEL.
+jobs:
+  linux:
+    name: Date rules and scripts (Linux)
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: bash -n scripts/*.sh
+      - run: bash scripts/test-release-source-gate.sh
+      # DueCore.swift is Foundation-only; this proves it stays portable.
+      - run: bash scripts/test-due-picker.sh
+
+  macos:
+    name: EventKit, app model and build (macOS)
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # EventKit tests edit unsaved in-memory reminders; nothing is read from
+      # or written to a Reminders store.
+      - run: bash scripts/test-due-picker.sh
+      # No signing identity on the runner, so this is an ad-hoc signed build.
+      - run: bash scripts/build-due-picker-app.sh --output "$RUNNER_TEMP/app"

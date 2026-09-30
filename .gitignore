@@ -1,0 +1,5 @@
+# Build output (scripts/build-due-picker-app.sh)
+build/
+
+# macOS
+.DS_Store
