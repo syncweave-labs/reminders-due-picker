@@ -35,7 +35,9 @@ final class GoogleSync: ObservableObject {
         guard !started, !demo else { return }
         started = true
         readStatus()
-        if enabled { startWorker() }
+        // Migration restores the enabled preference before the first app
+        // launch. Reconcile login registration even without a toggle click.
+        if enabled { setEnabled(true) }
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.readStatus()
