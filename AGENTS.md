@@ -15,7 +15,14 @@ the user's Mac and are never proved by source CI alone.
   that changed after the list was loaded is left alone.
 - Every action saves as one EventKit batch; a refused commit changes nothing.
   Undo restores due, start, and alarms exactly.
-- The app makes no network requests and stores no data of its own.
+- Date editing is local. Optional Google Tasks sync sends reminder data to the
+  connected Google account. The app owns credentials, state and private logs in
+  `~/Library/Application Support/RemindersDuePicker/GoogleSync`.
+- Google sync preserves the imported engine's conflict, account-binding and
+  destructive-plan approval rules. The engine ships inside the signed bundle;
+  EventKit exports and writes run through helper modes of the same app binary.
+- Closing the window keeps automatic sync in the menu bar. Quitting stops the
+  worker. Login starts the installed app, never a development checkout.
 
 ## Source And Runtime Ownership
 

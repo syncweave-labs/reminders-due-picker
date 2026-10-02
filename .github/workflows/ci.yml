@@ -23,6 +23,9 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
       - run: bash -n scripts/*.sh
       - run: bash scripts/test-release-source-gate.sh
       # DueCore.swift is Foundation-only; this proves it stays portable.
@@ -35,6 +38,9 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
       # EventKit tests edit unsaved in-memory reminders; nothing is read from
       # or written to a Reminders store.
       - run: bash scripts/test-due-picker.sh

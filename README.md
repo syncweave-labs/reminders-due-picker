@@ -8,8 +8,8 @@ Reminders 앱에서 날짜를 고르려면 항목마다 정보 패널을 열고,
 
 A native macOS app (SwiftUI + EventKit) for moving Apple Reminders due dates
 quickly: select one or many reminders, then use a one-click preset, a calendar
-day, a time chip, or Korean natural-language input. It runs entirely on the Mac
-and makes no network requests.
+day, a time chip, or Korean natural-language input. Date editing runs on the Mac. Optional built-in Google Tasks sync keeps the
+connected account in sync without a separate command or standalone scheduler.
 
 - License: [MIT](LICENSE)
 - Security policy: [SECURITY.md](SECURITY.md)
@@ -46,19 +46,48 @@ and makes no network requests.
 
 반복 미리 알림은 날짜를 없앨 수 없고 읽기 전용 목록은 건너뛴다. 목록을 불러온 뒤
 다른 기기나 동기화가 먼저 바꾼 항목은 덮어쓰지 않고 그대로 둔다. 모든 변경은 한
-번에 저장되고 `되돌리기`로 원래 날짜, 시작일, 알림까지 돌린다. 제목과 날짜는 이
-Mac 밖으로 나가지 않는다.
+번에 저장되고 `되돌리기`로 원래 날짜, 시작일, 알림까지 돌린다. 날짜 편집 자체는 로컬에서 동작한다. Google Tasks를 연결하면 제목·메모·날짜·완료
+상태가 연결한 Google 계정과 동기화된다.
 
-## Google Tasks와 함께 쓰기
+## 앱 안에서 Google Tasks 연결
 
-이 앱은 Reminders만 있으면 혼자 동작한다.
-[reminders-task-bridge](https://github.com/syncweave-labs/reminders-task-bridge)로
-Reminders와 Google Tasks를 동기화하고 있다면, 이 앱에서 바꾼 날짜도 평소처럼
-Google Tasks에 날짜로 반영된다(Google Tasks는 시간을 저장하지 않는다).
+상단의 **Google Tasks** 버튼에서 연결 상태와 마지막 동기화 시간을 확인하고,
+**Google 연결/다시 로그인**, **연결 확인**, **지금 동기화**를 실행한다.
+처음 연결하는 Mac에서는 Google Cloud Desktop OAuth 클라이언트 JSON을 선택한 뒤
+브라우저에서 로그인한다. 계정에 기존 동기화 상태가 있으면 같은 Google 계정임을
+확인한 경우에만 새 인증을 저장한다. 다른 계정의 상태는 재사용하지 않는다.
+
+자동 동기화를 켜면 60초마다 미리알림과 Google Tasks의 제목·메모·날짜·완료 상태를
+양방향으로 동기화한다. Google Tasks는 시간을 저장하지 않는다. 기존 설치를
+이전할 때는 목록 정책과 실행 간격을 그대로 이어받는다. 창을 닫으면 메뉴 막대에서
+계속 실행되고, 앱을 종료하면 중단된다. 다음 로그인에는 설치된 앱이 창 없이
+실행된다. 자동 동기화를 끄면 현재 작업과 로그인 시 자동 실행이 모두 중지된다.
+
+동기화 엔진은 서명된 앱 번들 안에 포함된다. 독립 command나 별도 Python 스크립트
+설치는 필요 없다. Python 3.10 이상 런타임은 필요하다. 미리알림 읽기·쓰기는 같은
+앱 실행 파일의 EventKit 모드로 처리해 앱의 접근 권한을 공유한다.
+
+설정·OAuth 인증·동기화 매핑·상태·비공개 로그는
+`~/Library/Application Support/RemindersDuePicker/GoogleSync`에 저장한다(디렉터리
+0700, 파일 0600). 대량 삭제·완료는 기존 엔진의 확인 창에서 승인한 작업만
+반영하며, 승인 대기 중에도 나머지 변경은 계속 동기화한다. 처음 연결한 Mac은
+삭제 전파를 끈 상태로 시작한다.
+
+기존 `icloud-reminders-google-sync` 설치가 있으면 설치기가 별도 LaunchAgent를
+중지하고 현재 인증·매핑을 그대로 이전한다. 기존 자료는 새 앱에서 날짜/제목
+일치 검증을 포함한 동기화가 성공할 때까지 보존한다. 성공 후 검토된 main에서:
+
+```bash
+python3 scripts/migrate-google-sync.py cleanup
+```
+
+이 명령은 이전 command 바로가기, LaunchAgent, 실행용 릴리스, 설정·이전 백업·로그를
+제거한다. 개발 소스 저장소는 삭제하지 않는다. 새 앱의 인증과 상태 기록은 유지한다.
 
 ## 요구 사항
 
 - macOS 14 이상
+- Google Tasks 동기화: Python 3.10 이상 (이 Mac의 Homebrew Python 사용)
 - Xcode Command Line Tools (`xcode-select --install`). Xcode는 필요 없다.
 - 선택: `Apple Development` 또는 `Developer ID Application` 코드 서명 인증서.
   있으면 그것으로 서명해 재설치 후에도 미리 알림 권한이 유지된다. 없으면 ad-hoc
@@ -91,8 +120,8 @@ DEPLOY_EXPECTED_COMMIT="$(git rev-parse HEAD)" bash scripts/install-due-picker-a
 필수다. 기대 GitHub origin은 우회할 수 없다.
 
 되돌리려면 이전 `main` commit을 체크아웃해 같은 방식으로 설치하거나
-`~/Applications/미리알림 날짜.app`을 지운다. 앱은 자기 데이터를 따로 저장하지
-않는다.
+`~/Applications/미리알림 날짜.app`을 지운다. Google Tasks 연결 정보까지 제거하려면 먼저 자동 동기화를 끄고
+위의 앱 전용 저장소를 삭제한다. 미리알림과 Google Tasks 항목 자체는 삭제되지 않는다.
 
 ## 개발
 

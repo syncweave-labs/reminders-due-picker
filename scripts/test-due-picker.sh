@@ -15,6 +15,10 @@ fi
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/due-picker-tests.XXXXXX")"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
+SYNC_PYTHON="${SYNC_PYTHON:-$(command -v python3)}"
+if [ -x /opt/homebrew/bin/python3 ]; then SYNC_PYTHON=/opt/homebrew/bin/python3; fi
+(cd "${PROJECT_DIR}/Sync" && "$SYNC_PYTHON" -B -m unittest test_icloud_reminders_google_sync.py test_app_bridge.py)
+
 "$SWIFTC" -swift-version 5 -Onone \
   "${PROJECT_DIR}/Sources/DueCore.swift" \
   "${PROJECT_DIR}/Tests/CoreTests/main.swift" \
@@ -26,6 +30,7 @@ if [ "$(uname -s)" = "Darwin" ]; then
     "${PROJECT_DIR}/Sources/DueCore.swift" \
     "${PROJECT_DIR}/Sources/ReminderStore.swift" \
     "${PROJECT_DIR}/Sources/AppModel.swift" \
+    "${PROJECT_DIR}/Sources/SyncFiles.swift" \
     "${PROJECT_DIR}/Tools/DemoBackend.swift" \
     "${PROJECT_DIR}/Tests/AppTests/AppTests.swift" \
     -o "${WORK_DIR}/app-tests"

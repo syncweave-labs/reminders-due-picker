@@ -2,12 +2,43 @@
 
 import AppKit
 import SwiftUI
+import Darwin
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        GoogleSync.shared.start()
+        if CommandLine.arguments.contains("--background") {
+            NSApp.setActivationPolicy(.accessory)
+            DispatchQueue.main.async { NSApp.windows.forEach { $0.orderOut(nil) } }
+        }
+    }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { !GoogleSync.shared.enabled }
+    func applicationWillTerminate(_ notification: Notification) { GoogleSync.shared.stopForTermination() }
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        NSApp.setActivationPolicy(.regular)
+        NSApp.windows.first?.makeKeyAndOrderFront(nil)
+        return true
+    }
 }
 
 @main
+enum AppEntry {
+    private static var instanceLock: Int32 = -1
+    @MainActor
+    static func main() {
+        if CommandLine.arguments.dropFirst().first == "--sync-export" { SyncExport.run(); return }
+        if CommandLine.arguments.dropFirst().first == "--sync-apply" { SyncApply.run(); return }
+        let directory = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/RemindersDuePicker")
+        do { try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700]) }
+        catch { exit(1) }
+        instanceLock = open(directory.appendingPathComponent("app.lock").path, O_CREAT | O_RDWR | O_NOFOLLOW, 0o600)
+        guard instanceLock >= 0, flock(instanceLock, LOCK_EX | LOCK_NB) == 0 else { exit(0) }
+        DuePickerApp.main()
+    }
+}
+
 struct DuePickerApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var model = AppModel(backend: EventKitBackend())
@@ -18,6 +49,31 @@ struct DuePickerApp: App {
         }
         .defaultSize(width: 1220, height: 880)
         .commands { DueCommands(model: model) }
+        MenuBarExtra("미리알림 날짜", systemImage: "calendar.badge.clock") {
+            SyncMenu(sync: .shared)
+        }
+    }
+}
+
+struct SyncMenu: View {
+    @ObservedObject var sync: GoogleSync
+    @Environment(\.openWindow) private var openWindow
+    var body: some View {
+        Text(sync.message)
+        Button("미리알림 날짜 열기") {
+            NSApp.setActivationPolicy(.regular)
+            openWindow(id: "main")
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        Button("Google Tasks 설정") {
+            NSApp.setActivationPolicy(.regular)
+            openWindow(id: "main")
+            NSApp.activate(ignoringOtherApps: true)
+            sync.showsSettings = true
+        }
+        Button("지금 동기화") { sync.syncNow() }.disabled(!sync.enabled || sync.busy)
+        Divider()
+        Button("종료") { NSApp.terminate(nil) }.keyboardShortcut("q")
     }
 }
 
