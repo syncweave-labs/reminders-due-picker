@@ -115,9 +115,12 @@ def cleanup(home):
                     path.unlink()
     agent = home / "Library/LaunchAgents/com.icloud-reminders-google-sync.plist"
     agent.unlink(missing_ok=True)
-    for path in (old, runtime, home / "Library/Logs/icloud-reminders-google-sync"):
+    retired_directories = (old, runtime, home / "Library/Logs/icloud-reminders-google-sync",
+                           home / ".local/state/codex-backups/icloud-reminders-google-sync")
+    for path in retired_directories:
         if path.is_symlink():
             raise RuntimeError("Refusing cleanup of a linked legacy directory.")
+    for path in retired_directories:
         if path.exists():
             shutil.rmtree(path)
     manifest["cleanup_complete"] = True
