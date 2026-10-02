@@ -153,7 +153,9 @@ def loop(args):
     except KeyboardInterrupt:
         pass
     finally:
-        ready.unlink(missing_ok=True)
+        # During an app update a replacement may already own this marker.
+        if ready.exists() and engine.read_json(ready).get("pid") == os.getpid():
+            ready.unlink(missing_ok=True)
 
 
 def main():
