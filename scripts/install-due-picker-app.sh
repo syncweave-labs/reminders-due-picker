@@ -99,6 +99,10 @@ codesign --verify --strict "$BUILT"
 BUILT_COMMIT="$(plutil -extract DuePickerSourceCommit raw -o - "${BUILT}/Contents/Info.plist")"
 [ "$BUILT_COMMIT" = "$RELEASE_COMMIT" ] || die "Built bundle records ${BUILT_COMMIT}, expected ${RELEASE_COMMIT}."
 
+# Migration pauses the old scheduler but keeps its files until the installed
+# app completes a new consistency-verified sync. Never run this from a task branch.
+python3 "${SCRIPT_DIR}/migrate-google-sync.py" prepare
+
 if pgrep -x "$EXECUTABLE" >/dev/null 2>&1; then
   printf '==> Closing the running 미리알림 날짜 before replacing it\n'
   pkill -TERM -x "$EXECUTABLE" 2>/dev/null || true

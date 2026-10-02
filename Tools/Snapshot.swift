@@ -73,6 +73,10 @@ enum SnapshotTool {
                    to: output.appendingPathComponent("due-picker-inspector.png"))
         renderView(InspectorPreview(model: multiple), appearance: .darkAqua, size: NSSize(width: 390, height: 880),
                    to: output.appendingPathComponent("due-picker-inspector-multiple-dark.png"))
+        renderView(GoogleSyncView(sync: GoogleSync(demo: true)), appearance: .aqua, size: NSSize(width: 504, height: 390),
+                   to: output.appendingPathComponent("google-sync-light.png"))
+        renderView(GoogleSyncView(sync: GoogleSync(demo: true)), appearance: .darkAqua, size: NSSize(width: 504, height: 390),
+                   to: output.appendingPathComponent("google-sync-dark.png"))
         exit(0)
     }
 
@@ -138,7 +142,7 @@ enum SnapshotTool {
         NSApp.appearance = NSAppearance(named: appearance)
         window.appearance = NSAppearance(named: appearance)
         window.title = "미리알림 날짜"
-        let hosting = NSHostingView(rootView: ContentView(model: model))
+        let hosting = NSHostingView(rootView: ContentView(model: model, sync: GoogleSync(demo: true)))
         hosting.sceneBridgingOptions = [.toolbars, .title]
         window.contentView = hosting
         window.setFrame(NSRect(origin: origin, size: size), display: false)

@@ -43,12 +43,39 @@ enum AppTests {
         calendar.firstWeekday = 1
         eventKitTests(check, calendar)
         await modelTests(check, calendar)
+        privateLogTests(check)
         print("App tests: \(check.passed) passed, \(check.failed) failed")
         exit(check.failed == 0 ? 0 : 1)
     }
 
     static func at(_ calendar: Calendar, _ y: Int, _ m: Int, _ d: Int, _ h: Int = 0, _ min: Int = 0) -> Date {
         calendar.date(from: DateComponents(year: y, month: m, day: d, hour: h, minute: min))!
+    }
+
+    @MainActor
+    static func privateLogTests(_ check: Checker) {
+        let fm = FileManager.default
+        let scratch = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? fm.removeItem(at: scratch) }
+        do {
+            let handle = try SyncFiles.openPrivateLog(in: scratch)
+            try handle.write(contentsOf: Data("synthetic private title".utf8)); try handle.close()
+            let log = scratch.appendingPathComponent("sync.log")
+            check.equal(try fm.attributesOfItem(atPath: scratch.path)[.posixPermissions] as? Int, 0o700, "private sync directory")
+            try fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: log.path)
+            let rotated = try SyncFiles.openPrivateLog(in: scratch, maxBytes: 4); try rotated.close()
+            check.equal(try fm.attributesOfItem(atPath: log.path)[.posixPermissions] as? Int, 0o600, "private current log")
+            check.equal(try fm.attributesOfItem(atPath: scratch.appendingPathComponent("sync.log.1").path)[.posixPermissions] as? Int, 0o600, "private rotated log")
+            let victim = scratch.appendingPathComponent("victim")
+            try Data("untouched".utf8).write(to: victim)
+            try fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: victim.path)
+            try fm.removeItem(at: log)
+            try fm.createSymbolicLink(at: log, withDestinationURL: victim)
+            do { let linked = try SyncFiles.openPrivateLog(in: scratch); try linked.close(); check.expect(false, "refuse linked log") }
+            catch { check.expect(true, "refused linked log") }
+            check.equal(try String(contentsOf: victim, encoding: .utf8), "untouched", "link target untouched")
+            check.equal(try fm.attributesOfItem(atPath: victim.path)[.posixPermissions] as? Int, 0o644, "link target mode untouched")
+        } catch { check.expect(false, "private log test: \(error)") }
     }
 
     @MainActor

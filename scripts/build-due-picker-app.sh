@@ -94,6 +94,8 @@ SOURCES=(
   "${PROJECT_DIR}/Sources/ReminderStore.swift"
   "${PROJECT_DIR}/Sources/AppModel.swift"
   "${PROJECT_DIR}/Sources/Views.swift"
+  "${PROJECT_DIR}/Sources/GoogleSync.swift"
+  "${PROJECT_DIR}/Sources/SyncFiles.swift"
 )
 SWIFT_FLAGS=(-swift-version 5 -parse-as-library -target "$TARGET")
 
@@ -108,7 +110,7 @@ fi
 
 printf '==> Compiling %s (%s)\n' "$EXECUTABLE" "$TARGET"
 swiftc "${SWIFT_FLAGS[@]}" -O -module-name DuePicker \
-  "${SOURCES[@]}" "${PROJECT_DIR}/Sources/App.swift" \
+  "${SOURCES[@]}" "${PROJECT_DIR}/Sources/SyncExport.swift" "${PROJECT_DIR}/Sources/SyncApply.swift" "${PROJECT_DIR}/Sources/App.swift" \
   -o "${WORK_DIR}/${EXECUTABLE}"
 
 printf '==> Drawing the app icon\n'
@@ -123,6 +125,9 @@ cp "${WORK_DIR}/${EXECUTABLE}" "${BUNDLE}/Contents/MacOS/${EXECUTABLE}"
 chmod 0755 "${BUNDLE}/Contents/MacOS/${EXECUTABLE}"
 cp "${PROJECT_DIR}/Info.plist" "${BUNDLE}/Contents/Info.plist"
 cp "${WORK_DIR}/AppIcon.icns" "${BUNDLE}/Contents/Resources/AppIcon.icns"
+mkdir -p "${BUNDLE}/Contents/Resources/Sync"
+cp "${PROJECT_DIR}/Sync/icloud_reminders_google_sync.py" "${PROJECT_DIR}/Sync/app_bridge.py" \
+   "${PROJECT_DIR}/Sync/LICENSE" "${PROJECT_DIR}/Sync/ORIGIN.md" "${BUNDLE}/Contents/Resources/Sync/"
 printf 'APPL????' >"${BUNDLE}/Contents/PkgInfo"
 printf '"CFBundleDisplayName" = "%s";\n"CFBundleName" = "%s";\n' "$APP_NAME" "$APP_NAME" \
   >"${BUNDLE}/Contents/Resources/ko.lproj/InfoPlist.strings"

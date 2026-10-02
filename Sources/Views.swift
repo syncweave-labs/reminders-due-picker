@@ -10,6 +10,7 @@ extension RGBColor {
 
 struct ContentView: View {
     @ObservedObject var model: AppModel
+    @ObservedObject var sync: GoogleSync = .shared
 
     var body: some View {
         Group {
@@ -25,6 +26,14 @@ struct ContentView: View {
         }
         .frame(minWidth: 1040, minHeight: 660)
         .task { await model.start() }
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button { sync.showsSettings.toggle() } label: {
+                    Label("Google Tasks", systemImage: "arrow.triangle.2.circlepath")
+                }
+                .popover(isPresented: $sync.showsSettings) { GoogleSyncView(sync: sync) }
+            }
+        }
     }
 }
 
