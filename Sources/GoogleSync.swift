@@ -120,9 +120,16 @@ final class GoogleSync: ObservableObject {
 
     func syncNow() {
         guard !busy else { return }
-        if !enabled { setEnabled(true) }
-        if let worker, worker.isRunning { kill(worker.processIdentifier, SIGUSR1); state = "running" }
-        else { startWorker() }
+        if !enabled { setEnabled(true); return }
+        guard let worker, worker.isRunning else { startWorker(); return }
+        // A newly launched worker starts its first cycle immediately. Signal
+        // only after its handler is installed; SIGUSR1 defaults to termination.
+        if let data = try? Data(contentsOf: dataDirectory.appendingPathComponent("worker.json")),
+           let ready = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           ready["pid"] as? Int == Int(worker.processIdentifier) {
+            kill(worker.processIdentifier, SIGUSR1)
+            state = "running"
+        }
     }
 
     func checkConnection() { runAction("check") }

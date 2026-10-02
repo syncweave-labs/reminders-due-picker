@@ -146,10 +146,14 @@ def loop(args):
             if approvals.dialog_open() and not approvals.dialog_running():
                 return
     engine.wait_for_next_cycle = wait
+    ready = Path(args.config).parent / "worker.json"
+    engine.write_json_atomic(ready, {"pid": os.getpid()})
     try:
         engine.cmd_run_loop(argparse.Namespace(config=args.config))
     except KeyboardInterrupt:
         pass
+    finally:
+        ready.unlink(missing_ok=True)
 
 
 def main():

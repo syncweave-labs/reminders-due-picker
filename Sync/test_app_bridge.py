@@ -4,6 +4,11 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import subprocess
+import sys
+import os
+import signal
+import time
 from unittest.mock import patch, Mock
 
 import app_bridge as bridge
@@ -15,6 +20,31 @@ spec.loader.exec_module(migration)
 
 
 class AppBridgeTests(unittest.TestCase):
+    def test_sync_now_wakes_a_ready_worker_without_restarting_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            code = '''import argparse, time
+import app_bridge as bridge
+class Approvals:
+    def dialog_open(self): return False
+def cycle(args):
+    bridge.engine.wait_for_next_cycle(300, Approvals())
+bridge.engine.cmd_run_loop = cycle
+bridge.loop(argparse.Namespace(config=__import__('sys').argv[1]))
+'''
+            process = subprocess.Popen([sys.executable, "-B", "-c", code, str(Path(tmp) / "config.json")], cwd=Path(__file__).parent)
+            try:
+                ready = Path(tmp) / "worker.json"
+                deadline = time.monotonic() + 10
+                while not ready.exists() and time.monotonic() < deadline:
+                    if process.poll() is not None: self.fail("worker exited before readiness")
+                    time.sleep(0.02)
+                self.assertEqual(json.loads(ready.read_text())["pid"], process.pid)
+                os.kill(process.pid, signal.SIGUSR1)
+                self.assertEqual(process.wait(timeout=5), 0)
+                self.assertFalse(ready.exists())
+            finally:
+                if process.poll() is None: process.terminate(); process.wait(timeout=5)
+
     def test_initial_setup_disables_deletions_and_stays_app_owned(self):
         with tempfile.TemporaryDirectory() as tmp:
             folder = Path(tmp) / "data"
