@@ -25,6 +25,12 @@ if [ -x /opt/homebrew/bin/python3 ]; then SYNC_PYTHON=/opt/homebrew/bin/python3;
   -o "${WORK_DIR}/core-tests"
 "${WORK_DIR}/core-tests"
 
+"$SWIFTC" -swift-version 5 -Onone \
+  "${PROJECT_DIR}/Sources/SyncApplyJournal.swift" \
+  "${PROJECT_DIR}/Tests/SyncApplyTests/main.swift" \
+  -o "${WORK_DIR}/sync-apply-tests"
+"${WORK_DIR}/sync-apply-tests"
+
 if [ "$(uname -s)" = "Darwin" ]; then
   "$SWIFTC" -swift-version 5 -Onone -parse-as-library -target "$(uname -m)-apple-macos14.0" \
     "${PROJECT_DIR}/Sources/DueCore.swift" \
