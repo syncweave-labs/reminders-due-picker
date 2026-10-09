@@ -96,6 +96,7 @@ SOURCES=(
   "${PROJECT_DIR}/Sources/Views.swift"
   "${PROJECT_DIR}/Sources/GoogleSync.swift"
   "${PROJECT_DIR}/Sources/SyncFiles.swift"
+  "${PROJECT_DIR}/Sources/SyncApplyJournal.swift"
 )
 SWIFT_FLAGS=(-swift-version 5 -parse-as-library -target "$TARGET")
 

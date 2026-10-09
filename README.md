@@ -149,3 +149,10 @@ bash scripts/build-due-picker-app.sh --snapshots /tmp/due # 데모 데이터로 
 메모리 속 미리 알림만 고치고, 앱 모델 테스트와 스냅숏은 내장 데모 데이터를 쓴다.
 날짜 규칙 테스트는 CI의 Linux에서도, EventKit·앱 모델 테스트와 빌드는 CI의
 macOS에서 돈다.
+
+Planner의 `--sync-apply` 생성 요청은 `operation_id`를 저장 전에 기록합니다.
+기록은 앱 전용 GoogleSync 저장소의 `BridgeApply/creates.json`에 모드 0600으로
+보관하고 프로세스 잠금으로 동시 생성을 막습니다. 저장 후 응답이 끊기면 기존
+미리 알림 식별자를 조회해 원래 결과를 돌려줍니다. 결과를 확인할 수 없으면
+`uncertain`으로 남기며 같은 요청으로 새 항목을 다시 생성하지 않습니다.
+이 기록을 지우면 생성 중복 방지가 사라지므로 동기화 상태와 함께 백업해야 합니다.

@@ -179,6 +179,14 @@ guard let operations = rawPayload as? [[String: Any]] else {
     fail("Expected a JSON array of operation objects.")
 }
 
+for operation in operations where operation["create"] as? Bool == true {
+    if let id = operation["operation_id"] {
+        guard let value = id as? String, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            fail("Creation operation_id must be a nonempty string.")
+        }
+    }
+}
+
 let store = EKEventStore()
 guard requestReminderAccess(store) else {
     fail("Reminders access was denied. Enable it in System Settings > Privacy & Security > Reminders.")
@@ -213,9 +221,27 @@ for reminder in reminders {
 }
 
 var results: [[String: Any]] = []
+var creationJournal: SyncApplyJournal?
+if operations.contains(where: { $0["create"] as? Bool == true && !($0["operation_id"] as? String ?? "").isEmpty }) {
+    let directory = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Application Support/RemindersDuePicker/GoogleSync/BridgeApply")
+    do { creationJournal = try SyncApplyJournal(directory: directory) }
+    catch { fail("Cannot open creation journal: \(error.localizedDescription)") }
+}
 
 for operation in operations {
     if operation["create"] as? Bool == true {
+        if let journal = creationJournal, !(operation["operation_id"] as? String ?? "").isEmpty {
+            do {
+                if let recovered = try journal.recover(operation: operation, readback: { identifier in
+                    guard let existing = store.calendarItem(withIdentifier: identifier) as? EKReminder else { return nil }
+                    return result(for: existing, status: "created")
+                }) {
+                    results.append(recovered)
+                    continue
+                }
+            } catch { fail("Cannot reconcile creation journal: \(error.localizedDescription)") }
+        }
         let listID = ((operation["list_id"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let listTitle = ((operation["list_title"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let titleMatches = listTitle.isEmpty ? [] : (calendarsByTitle[listTitle] ?? [])
@@ -254,9 +280,27 @@ for operation in operations {
         applyFields(to: reminder, operation: operation)
 
         do {
-            try store.save(reminder, commit: true)
-            results.append(result(for: reminder, status: "created"))
+            if let journal = creationJournal, !(operation["operation_id"] as? String ?? "").isEmpty {
+                let receipt = try journal.create(operation: operation, stage: {
+                    try store.save(reminder, commit: false)
+                    return reminder.calendarItemIdentifier
+                }, commit: {
+                    try store.commit()
+                    return result(for: reminder, status: "created")
+                }, readback: { identifier in
+                    guard let existing = store.calendarItem(withIdentifier: identifier) as? EKReminder else { return nil }
+                    return result(for: existing, status: "created")
+                })
+                results.append(receipt)
+            } else {
+                try store.save(reminder, commit: true)
+                results.append(result(for: reminder, status: "created"))
+            }
         } catch {
+            // A journal error after staging must stop before any later commit.
+            if creationJournal != nil && !(operation["operation_id"] as? String ?? "").isEmpty {
+                fail("Creation result could not be confirmed: \(error.localizedDescription)")
+            }
             results.append(["list_title": listTitle, "status": "error", "message": error.localizedDescription])
         }
         continue
