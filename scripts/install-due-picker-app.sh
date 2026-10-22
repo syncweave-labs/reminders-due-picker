@@ -108,28 +108,41 @@ migrate_legacy_bundles() {
   done
 }
 
-# Rewrite ProgramArguments[0] of the login agent to the new executable, keeping
-# Label/RunAtLoad/ProcessType and the --background argument. Never create it if
-# absent. Atomic write, mode 0600.
+# Rewrite the login agent's ProgramArguments to exactly
+# [new_executable, --background], keeping Label/RunAtLoad/ProcessType. Never
+# create it if absent. Atomic write, mode 0600. Idempotent on re-run.
+#
+# The whole ProgramArguments array is replaced in one shot, not index by index:
+# on this macOS `plutil -replace ProgramArguments.0 ...` on a 2-element array
+# inserts rather than replaces, which turned [old, --background] into
+# [new, --background, old, --background]. `-replace ProgramArguments -json`
+# swaps the entire value atomically and is immune to that.
 migrate_login_agent() {
   local new_executable="$1"
   local plist="${LAUNCHAGENTS_DIR}/${LOGIN_LABEL}.plist"
   [ -f "$plist" ] || return 0
-  local current
-  current="$(plutil -extract ProgramArguments.0 raw -o - "$plist" 2>/dev/null || true)"
-  [ "$current" = "$new_executable" ] && return 0
+  # Already exactly [new_executable, --background]? Then there is nothing to do.
+  local arg0 arg1 count
+  arg0="$(plutil -extract ProgramArguments.0 raw -o - "$plist" 2>/dev/null || true)"
+  arg1="$(plutil -extract ProgramArguments.1 raw -o - "$plist" 2>/dev/null || true)"
+  count="$(plutil -extract ProgramArguments raw -o - "$plist" 2>/dev/null | head -n1 || true)"
+  if [ "$arg0" = "$new_executable" ] && [ "$arg1" = "--background" ] && [ "$count" = "2" ]; then
+    return 0
+  fi
+  # Build the replacement array as JSON. The executable path can contain spaces
+  # but not control characters; escape backslashes and double quotes for JSON.
+  local esc
+  esc="$new_executable"
+  esc="${esc//\\/\\\\}"
+  esc="${esc//\"/\\\"}"
   local tmp
   tmp="$(mktemp "${LAUNCHAGENTS_DIR}/.login-agent.XXXXXX")"
   cp "$plist" "$tmp"
-  plutil -replace ProgramArguments.0 -string "$new_executable" "$tmp" \
+  plutil -replace ProgramArguments -json "[\"${esc}\", \"--background\"]" "$tmp" \
     || { rm -f "$tmp"; die "Could not rewrite the login agent."; }
-  # Keep the remaining argument as --background if the array lost it.
-  if [ "$(plutil -extract ProgramArguments.1 raw -o - "$tmp" 2>/dev/null || true)" != "--background" ]; then
-    plutil -replace ProgramArguments.1 -string "--background" "$tmp" || true
-  fi
   chmod 0600 "$tmp"
   mv "$tmp" "$plist"
-  printf '==> Rewrote login agent ProgramArguments[0] -> %s\n' "$new_executable"
+  printf '==> Rewrote login agent ProgramArguments -> [%s, --background]\n' "$new_executable"
 }
 
 run_migration() {

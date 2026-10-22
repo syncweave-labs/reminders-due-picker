@@ -621,7 +621,13 @@ enum AppTests {
             check.equal(dict["Label"] as? String, label, "Label kept")
             check.equal(dict["RunAtLoad"] as? Bool, true, "RunAtLoad kept")
             check.equal(dict["ProcessType"] as? String, "Interactive", "ProcessType kept")
-            check.equal((dict["ProgramArguments"] as? [String])?.last, "--background", "--background kept")
+            // The WHOLE array must be exactly [newExe, --background] — not merely
+            // ending in --background — so a partial rewrite that appended to the
+            // old array would fail here.
+            check.equal(dict["ProgramArguments"] as? [String] ?? [], [newExe, "--background"],
+                        "ProgramArguments is exactly [newExe, --background]")
+            check.equal(Set(dict.keys), Set(["Label", "ProgramArguments", "RunAtLoad", "ProcessType"]),
+                        "key set is exactly the canonical four")
         } else {
             check.expect(false, "could not read rewritten plist")
         }
