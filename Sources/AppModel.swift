@@ -5,7 +5,7 @@ import Combine
 import Foundation
 
 enum ReminderFilter: Hashable {
-    case all, today, overdue, scheduled, undated
+    case all, today, overdue, scheduled, undated, completed
     case list(String)
 }
 
@@ -35,11 +35,23 @@ struct ReminderSection: Identifiable {
     var id: Int { bucket.rawValue }
 }
 
+/// A batch delete waiting on the confirmation dialog. Holds the exact items so
+/// the guard matches what the user saw, even if the list reloads underneath.
+struct PendingDelete: Identifiable, Equatable {
+    let id = UUID()
+    let items: [ReminderItem]
+    var count: Int { items.count }
+
+    static func == (lhs: PendingDelete, rhs: PendingDelete) -> Bool { lhs.id == rhs.id }
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     @Published private(set) var access: AccessState = .checking
     @Published private(set) var lists: [ReminderList] = []
     @Published private(set) var items: [ReminderItem] = []
+    /// Reminders completed within `completedWindowDays`, for the 완료됨 smart list.
+    @Published private(set) var completedItems: [ReminderItem] = []
     @Published private(set) var isLoading = false
     @Published private(set) var loadedOnce = false
     @Published var filter: ReminderFilter = .all
@@ -56,6 +68,12 @@ final class AppModel: ObservableObject {
     @Published var quickAddTitle = ""
     @Published var quickAddDate = ""
     @Published var quickAddListID: String?
+    /// Inspector edit draft for the single selected reminder's title and notes.
+    @Published var editTitleDraft = ""
+    @Published var editNotesDraft = ""
+    /// Set when a batch delete is pending the confirmation dialog.
+    @Published var pendingDelete: PendingDelete?
+    private let completedWindowDays = 30
     /// Re-evaluated every minute so "오늘" and "지연됨" stay right while the app is open.
     @Published private(set) var clock: Date
 
@@ -106,9 +124,11 @@ final class AppModel: ObservableObject {
         isLoading = true
         let fetchedLists = backend.fetchLists()
         let fetched = await backend.fetchReminders()
+        let fetchedCompleted = await backend.fetchCompleted(within: completedWindowDays)
         lists = fetchedLists
         items = fetched
-        let ids = Set(fetched.map(\.id))
+        completedItems = fetchedCompleted
+        let ids = Set(fetched.map(\.id)).union(fetchedCompleted.map(\.id))
         if !selection.isSubset(of: ids) { selection = selection.intersection(ids) }
         if case .list(let id) = filter, !fetchedLists.contains(where: { $0.id == id }) { filter = .all }
         if let chosen = quickAddListID, !fetchedLists.contains(where: { $0.id == chosen }) { quickAddListID = nil }
@@ -140,15 +160,22 @@ final class AppModel: ObservableObject {
         case .overdue: return bucket(for: item.due, now: clock, calendar: calendar) == .overdue
         case .scheduled: return item.due != nil
         case .undated: return item.due == nil
+        case .completed: return item.isCompleted
         case .list(let id): return item.listID == id
         }
     }
 
-    func count(for filter: ReminderFilter) -> Int { items.filter { matches($0, filter) }.count }
+    /// The store a filter draws from: the incomplete items, or the completed ones.
+    private func source(for filter: ReminderFilter) -> [ReminderItem] {
+        if case .completed = filter { return completedItems }
+        return items
+    }
+
+    func count(for filter: ReminderFilter) -> Int { source(for: filter).filter { matches($0, filter) }.count }
 
     var visibleItems: [ReminderItem] {
         let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
-        return items.filter { item in
+        return source(for: filter).filter { item in
             matches(item, filter) && (query.isEmpty || item.title.localizedCaseInsensitiveContains(query))
         }
     }
@@ -174,9 +201,14 @@ final class AppModel: ObservableObject {
         case .overdue: return "지연됨"
         case .scheduled: return "날짜 있음"
         case .undated: return "날짜 없음"
+        case .completed: return "완료됨"
         case .list(let id): return lists.first { $0.id == id }?.title ?? "목록"
         }
     }
+
+    /// True while the 완료됨 smart list is showing. Date actions stay hidden
+    /// there; completion toggling and other management actions still apply.
+    var isShowingCompleted: Bool { if case .completed = filter { return true } else { return false } }
 
     /// The selected reminders the list is showing. A reminder hidden by the
     /// search or by the current smart list is never changed, even while it
@@ -374,6 +406,193 @@ final class AppModel: ObservableObject {
     func showMonth(offset: Int) { displayedMonth = displayedMonth.adding(months: offset, calendar: calendar) }
 
     func showCurrentMonth() { displayedMonth = Day(today.year, today.month, 1) }
+
+    // MARK: Managing reminders
+
+    /// Whether a single reminder is selected and visible (title/notes editing).
+    var singleSelected: ReminderItem? { selectedItems.count == 1 ? selectedItems.first : nil }
+
+    /// Records a management report: applies the local change for the UI,
+    /// pushes undo, reloads on drift, shows status. `verb` names the action.
+    /// `localUpdate` mutates the cached lists for the changed ids now;
+    /// `localUndo` reverses that when the undo runs.
+    private func record(_ report: ApplyReport, verb: String, undoable: Bool = true,
+                        localUpdate: ((Set<String>) -> Void)? = nil,
+                        localUndo: ((Set<String>) -> Void)? = nil) {
+        if let failure = report.failure {
+            status = StatusMessage(.error, "\(verb) 실패: \(failure)")
+            scheduleReload()
+            return
+        }
+        let changedIDs = Set(report.changed)
+        localUpdate?(changedIDs)
+        let changed = report.changed.count
+        if undoable, let undo = report.undo, changed > 0 {
+            // Wrap the backend undo so the UI reflects the restored state too.
+            let wrapped = UndoAction { [weak self] in
+                let undone = undo.run()
+                localUndo?(Set(undone.changed))
+                self?.scheduleReload()
+                return undone
+            }
+            undoStack.append(("\(verb) \(changed)개", wrapped))
+            if undoStack.count > 30 { undoStack.removeFirst(undoStack.count - 30) }
+            canUndo = true
+        }
+        if changed == 0 {
+            status = StatusMessage(.warning, report.skipped.first?.reason.message ?? "\(verb)할 수 있는 항목이 없어요")
+        } else if let first = report.skipped.first {
+            status = StatusMessage(.warning,
+                                   "\(verb) \(changed)개 · \(report.skipped.count)개는 그대로: \(first.reason.message)",
+                                   offersUndo: undoable)
+        } else {
+            status = StatusMessage(.success, "\(verb) \(changed)개", offersUndo: undoable)
+        }
+        scheduleReload()
+    }
+
+    /// Mark the visible selection complete (or incomplete). Recurring reminders
+    /// are refused by the backend so no occurrence is silently dropped.
+    func setCompleted(_ complete: Bool) {
+        let targets = selectedItems
+        guard !targets.isEmpty else { status = StatusMessage(.warning, noTargetMessage); return }
+        let requests = targets.map { CompletionRequest(id: $0.id, expected: ReminderSnapshot($0), complete: complete) }
+        record(backend.setCompleted(requests), verb: complete ? "완료" : "완료 해제") { [weak self] ids in
+            guard let self else { return }
+            // Completed items leave the active list (and vice versa).
+            if complete {
+                for id in ids {
+                    if let index = self.items.firstIndex(where: { $0.id == id }) {
+                        var moved = self.items.remove(at: index)
+                        moved.isCompleted = true
+                        self.completedItems.insert(moved, at: 0)
+                    }
+                }
+            } else {
+                for id in ids {
+                    if let index = self.completedItems.firstIndex(where: { $0.id == id }) {
+                        var moved = self.completedItems.remove(at: index)
+                        moved.isCompleted = false
+                        moved.completionDate = nil
+                        self.items.append(moved)
+                    }
+                }
+            }
+        } localUndo: { [weak self] ids in
+            guard let self else { return }
+            // Reverse the store move the forward step made.
+            if complete {
+                for id in ids {
+                    if let index = self.completedItems.firstIndex(where: { $0.id == id }) {
+                        var moved = self.completedItems.remove(at: index)
+                        moved.isCompleted = false
+                        moved.completionDate = nil
+                        self.items.append(moved)
+                    }
+                }
+            } else {
+                for id in ids {
+                    if let index = self.items.firstIndex(where: { $0.id == id }) {
+                        var moved = self.items.remove(at: index)
+                        moved.isCompleted = true
+                        self.completedItems.insert(moved, at: 0)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Opens the delete confirmation for the visible selection.
+    func requestDelete() {
+        let targets = selectedItems
+        guard !targets.isEmpty else { status = StatusMessage(.warning, noTargetMessage); return }
+        pendingDelete = PendingDelete(items: targets)
+    }
+
+    /// Carries out a confirmed delete. No undo; the change reaches the mirrors.
+    func confirmDelete() {
+        guard let pending = pendingDelete else { return }
+        pendingDelete = nil
+        let requests = pending.items.map { DeleteRequest(id: $0.id, expected: ReminderSnapshot($0)) }
+        let report = backend.delete(requests)
+        if let failure = report.failure {
+            status = StatusMessage(.error, "삭제 실패: \(failure)")
+        } else if report.changed.isEmpty {
+            status = StatusMessage(.warning, report.skipped.first?.reason.message ?? "삭제할 수 있는 항목이 없어요")
+        } else if let first = report.skipped.first {
+            status = StatusMessage(.warning, "삭제 \(report.changed.count)개 · \(report.skipped.count)개는 그대로: \(first.reason.message)")
+        } else {
+            status = StatusMessage(.success, "삭제 \(report.changed.count)개 (되돌릴 수 없음)")
+        }
+        let removed = Set(report.changed)
+        items.removeAll { removed.contains($0.id) }
+        completedItems.removeAll { removed.contains($0.id) }
+        selection = selection.subtracting(removed)
+        scheduleReload()
+    }
+
+    func cancelDelete() { pendingDelete = nil }
+
+    /// Loads the inspector edit draft from the single selected reminder.
+    func loadEditDraft() {
+        guard let item = singleSelected else { editTitleDraft = ""; editNotesDraft = ""; return }
+        editTitleDraft = item.title
+        editNotesDraft = item.notes
+    }
+
+    /// Applies a transform to the cached item with `id`, in whichever store holds it.
+    private func mutateLocal(_ id: String, _ transform: (inout ReminderItem) -> Void) {
+        if let index = items.firstIndex(where: { $0.id == id }) { transform(&items[index]) }
+        else if let index = completedItems.firstIndex(where: { $0.id == id }) { transform(&completedItems[index]) }
+    }
+
+    /// Saves the inspector title/notes edit for the single selected reminder.
+    func saveEdit() {
+        guard let item = singleSelected else { status = StatusMessage(.warning, noTargetMessage); return }
+        guard let title = EditFieldLimits.normalizedTitle(editTitleDraft) else {
+            status = StatusMessage(.warning, "제목은 비워 둘 수 없어요")
+            return
+        }
+        let notes = EditFieldLimits.normalizedNotes(editNotesDraft)
+        guard title != item.title || notes != item.notes else {
+            status = StatusMessage(.info, "바뀐 내용이 없어요")
+            return
+        }
+        let before = item
+        let request = EditFieldsRequest(id: item.id, expected: ReminderSnapshot(item), newTitle: title, newNotes: notes)
+        record(backend.editFields(request), verb: "편집") { [weak self] ids in
+            for id in ids { self?.mutateLocal(id) { $0.title = title; $0.notes = notes; $0.hasNotes = !notes.isEmpty } }
+        } localUndo: { [weak self] ids in
+            for id in ids { self?.mutateLocal(id) { $0.title = before.title; $0.notes = before.notes; $0.hasNotes = before.hasNotes } }
+        }
+    }
+
+    /// Moves the visible selection to another writable list.
+    func move(toList listID: String) {
+        let targets = selectedItems
+        guard !targets.isEmpty else { status = StatusMessage(.warning, noTargetMessage); return }
+        let previous = Dictionary(uniqueKeysWithValues: targets.map { ($0.id, $0.listID) })
+        let requests = targets.map { MoveRequest(id: $0.id, expected: ReminderSnapshot($0), newListID: listID) }
+        let name = lists.first { $0.id == listID }?.title ?? "목록"
+        record(backend.move(requests), verb: "‘\(name)’(으)로 이동") { [weak self] ids in
+            for id in ids { self?.mutateLocal(id) { $0.listID = listID } }
+        } localUndo: { [weak self] ids in
+            for id in ids { if let prev = previous[id] { self?.mutateLocal(id) { $0.listID = prev } } }
+        }
+    }
+
+    /// Sets the priority of the visible selection.
+    func setPriority(_ priority: ReminderPriority) {
+        let targets = selectedItems
+        guard !targets.isEmpty else { status = StatusMessage(.warning, noTargetMessage); return }
+        let previous = Dictionary(uniqueKeysWithValues: targets.map { ($0.id, $0.priority) })
+        let requests = targets.map { PriorityRequest(id: $0.id, expected: ReminderSnapshot($0), newPriority: priority) }
+        record(backend.setPriority(requests), verb: "우선순위 ‘\(priority.title)’") { [weak self] ids in
+            for id in ids { self?.mutateLocal(id) { $0.priority = priority } }
+        } localUndo: { [weak self] ids in
+            for id in ids { if let prev = previous[id] { self?.mutateLocal(id) { $0.priority = prev } } }
+        }
+    }
 
     // MARK: Quick add
 

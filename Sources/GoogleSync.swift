@@ -4,6 +4,11 @@ import Foundation
 import Darwin
 import SwiftUI
 
+/// Reads, writes and self-heals the login-launch LaunchAgent plist. All paths
+/// are explicit so the decision and rewrite can be tested against a temp dir
+/// without touching the real ~/Library/LaunchAgents.
+// (Implemented in SyncSupport.swift so the macOS tests compile it without UI.)
+
 /// The window and login launch both use one app-owned engine process.
 @MainActor
 final class GoogleSync: ObservableObject {
@@ -17,6 +22,10 @@ final class GoogleSync: ObservableObject {
     @Published private(set) var message = "Google Tasks를 연결하면 미리알림과 자동으로 동기화합니다."
     @Published private(set) var account = ""
     @Published private(set) var lastSuccess: Date?
+    /// Read-only Notion mirror state for the sync popover.
+    @Published private(set) var notionStatus: NotionMirrorStatus = .unknown
+    /// Injectable for tests; defaults to the Planner bridge's path.
+    let notionStatePath: URL
     private var worker: Process?
     private var operation: Process?
     private var timer: Timer?
@@ -25,21 +34,35 @@ final class GoogleSync: ObservableObject {
     let dataDirectory: URL
     private let label = "com.icloud-reminders-google-sync.due-picker.login"
 
-    init(demo: Bool = false, dataDirectory: URL? = nil) {
+    init(demo: Bool = false, dataDirectory: URL? = nil, notionStatePath: URL? = nil) {
         self.demo = demo
         self.dataDirectory = dataDirectory ?? FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/RemindersDuePicker/GoogleSync")
+        self.notionStatePath = notionStatePath ?? NotionMirrorStatus.defaultPath
         enabled = demo || UserDefaults.standard.bool(forKey: "GoogleSyncEnabled")
-        if demo { state = "ok"; account = "user@example.com"; lastSuccess = Date(); message = "미리알림과 Google Tasks가 동기화되었습니다." }
+        if demo {
+            state = "ok"; account = "user@example.com"; lastSuccess = Date()
+            message = "미리알림과 Google Tasks가 동기화되었습니다."
+            notionStatus = NotionMirrorStatus(lastSuccessAt: Date().addingTimeInterval(-45),
+                                              pendingCreates: 2, total: 184, unavailable: false)
+        }
+    }
+
+    /// Refreshes the read-only Notion mirror status from the state file.
+    func refreshNotionStatus() {
+        guard !demo else { return }
+        notionStatus = NotionMirrorStatus.read(from: notionStatePath)
     }
 
     func start() {
         guard !started, !demo else { return }
         started = true
         readStatus()
+        refreshNotionStatus()
         // Migration restores the enabled preference before the first app
-        // launch. Reconcile login registration even without a toggle click.
-        if enabled { setEnabled(true) }
+        // launch. Reconcile login registration even without a toggle click,
+        // and self-heal a stale executable path (app moved or renamed).
+        if enabled { selfHealLoginAgent(); setEnabled(true) }
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.readStatus()
@@ -154,14 +177,19 @@ final class GoogleSync: ObservableObject {
 
     private func setLoginAgent(_ value: Bool) throws {
         let agents = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/LaunchAgents")
-        let path = agents.appendingPathComponent("\(label).plist")
-        if !value { try? FileManager.default.removeItem(at: path); return }
+        if !value { try LoginAgent.remove(label: label, agentsDirectory: agents); return }
         guard let executable = Bundle.main.executableURL else { return }
-        try FileManager.default.createDirectory(at: agents, withIntermediateDirectories: true)
-        let plist: [String: Any] = ["Label": label, "ProgramArguments": [executable.path, "--background"],
-                                    "RunAtLoad": true, "ProcessType": "Interactive"]
-        try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0).write(to: path, options: .atomic)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path.path)
+        try LoginAgent.write(label: label, agentsDirectory: agents, executablePath: executable.path)
+    }
+
+    /// Rewrites the login agent in place when it exists but points at a stale
+    /// executable (e.g. an app moved to /Applications, or renamed). Never
+    /// creates the agent when it is absent, and preserves
+    /// Label/RunAtLoad/ProcessType and the `--background` argument.
+    func selfHealLoginAgent() {
+        guard !demo, enabled, let executable = Bundle.main.executableURL else { return }
+        let agents = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/LaunchAgents")
+        _ = try? LoginAgent.selfHeal(label: label, agentsDirectory: agents, executablePath: executable.path)
     }
 
     func syncNow() {
@@ -267,10 +295,12 @@ struct GoogleSyncView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Label("Google Tasks", systemImage: "arrow.triangle.2.circlepath")
+            Label("동기화", systemImage: "arrow.triangle.2.circlepath")
                 .font(.title2.weight(.semibold))
-            Text("미리알림의 제목·메모·날짜·완료 상태를 양방향으로 동기화합니다. Google Tasks에는 날짜만 반영됩니다.")
+            Text("Google Tasks는 미리알림의 제목·메모·날짜·완료 상태를 양방향으로 동기화합니다(Google Tasks에는 날짜만). Notion 미러는 Planner 브리지가 미리알림을 Notion으로 단방향 반영합니다.")
                 .font(.callout).foregroundStyle(.secondary)
+            Divider()
+            Label("Google Tasks", systemImage: "checklist").font(.headline)
             if !sync.account.isEmpty { Label(sync.account, systemImage: "person.crop.circle") }
             Text(sync.message).font(.callout).textSelection(.enabled)
             if let last = sync.lastSuccess { Text("마지막 동기화: \(last.formatted(date: .abbreviated, time: .standard))").font(.caption).foregroundStyle(.secondary) }
@@ -286,6 +316,8 @@ struct GoogleSyncView: View {
                 if sync.busy { ProgressView().controlSize(.small) }
             }.disabled(sync.busy)
             Divider()
+            NotionMirrorRow(status: sync.notionStatus)
+            Divider()
             HStack {
                 Button("목록별 정책") { sync.showsPolicy = true }
                     .popover(isPresented: $sync.showsPolicy) { SyncPolicyView(model: SyncPolicyModel(sync: sync)) }
@@ -296,5 +328,37 @@ struct GoogleSyncView: View {
                 .font(.caption2).foregroundStyle(.secondary)
         }
         .padding(22).frame(width: 460)
+        .onAppear { sync.refreshNotionStatus() }
+    }
+}
+
+/// Read-only Notion mirror state. Reads only lastSuccessAt, pendingCreates and
+/// counts.total; a missing or unreadable file is a neutral state, never an error.
+struct NotionMirrorRow: View {
+    let status: NotionMirrorStatus
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Label("Notion 미러", systemImage: "square.and.arrow.up.on.square").font(.headline)
+            if status.unavailable {
+                Text("Notion 미러 상태를 확인할 수 없음")
+                    .font(.callout).foregroundStyle(.secondary)
+            } else {
+                HStack(spacing: 12) {
+                    Text("항목 \(status.total)개").monospacedDigit()
+                    if status.pendingCreates > 0 {
+                        Text("대기 중 \(status.pendingCreates)개").monospacedDigit().foregroundStyle(.orange)
+                    }
+                }
+                .font(.callout)
+                if let last = status.lastSuccessAt {
+                    Text("마지막 반영: \(last.formatted(date: .abbreviated, time: .standard))")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            Text("Planner 브리지가 미리알림 → Notion으로 반영합니다. 이 앱은 상태만 읽습니다.")
+                .font(.caption2).foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

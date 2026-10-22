@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Builds "미리알림 날짜.app" from this repository with the Command Line Tools
-# (swiftc, iconutil, codesign); Xcode is not required.
+# Builds "Reminders Due Picker.app" from this repository with the Command Line
+# Tools (swiftc, iconutil, codesign); Xcode is not required.
 set -euo pipefail
 
-APP_NAME="미리알림 날짜"
+APP_NAME="Reminders Due Picker"
 EXECUTABLE="DuePicker"
 MIN_MACOS="14.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -21,7 +21,7 @@ Usage:
   bash scripts/build-due-picker-app.sh --snapshots DIR
 
 Options:
-  --output DIR           Directory that receives "미리알림 날짜.app" (default: build/, ignored by Git).
+  --output DIR           Directory that receives "Reminders Due Picker.app" (default: build/, ignored by Git).
   --release-commit SHA   Record the reviewed commit in the bundle (the installer passes it).
   --sign IDENTITY        Code-signing identity. Defaults to DUE_PICKER_SIGN_IDENTITY, then the
                          first "Apple Development" or "Developer ID Application" identity, then
@@ -95,6 +95,7 @@ SOURCES=(
   "${PROJECT_DIR}/Sources/AppModel.swift"
   "${PROJECT_DIR}/Sources/Views.swift"
   "${PROJECT_DIR}/Sources/GoogleSync.swift"
+  "${PROJECT_DIR}/Sources/SyncSupport.swift"
   "${PROJECT_DIR}/Sources/SyncPolicy.swift"
   "${PROJECT_DIR}/Sources/SyncConflicts.swift"
   "${PROJECT_DIR}/Sources/SyncFiles.swift"
@@ -123,7 +124,7 @@ iconutil -c icns "${WORK_DIR}/AppIcon.iconset" -o "${WORK_DIR}/AppIcon.icns"
 
 printf '==> Assembling the bundle\n'
 BUNDLE="${WORK_DIR}/${APP_NAME}.app"
-mkdir -p "${BUNDLE}/Contents/MacOS" "${BUNDLE}/Contents/Resources/ko.lproj"
+mkdir -p "${BUNDLE}/Contents/MacOS" "${BUNDLE}/Contents/Resources"
 cp "${WORK_DIR}/${EXECUTABLE}" "${BUNDLE}/Contents/MacOS/${EXECUTABLE}"
 chmod 0755 "${BUNDLE}/Contents/MacOS/${EXECUTABLE}"
 cp "${PROJECT_DIR}/Info.plist" "${BUNDLE}/Contents/Info.plist"
@@ -133,8 +134,9 @@ cp "${PROJECT_DIR}/Sync/icloud_reminders_google_sync.py" "${PROJECT_DIR}/Sync/ap
    "${PROJECT_DIR}/Sync/sync_ui_support.py" \
    "${PROJECT_DIR}/Sync/LICENSE" "${PROJECT_DIR}/Sync/ORIGIN.md" "${BUNDLE}/Contents/Resources/Sync/"
 printf 'APPL????' >"${BUNDLE}/Contents/PkgInfo"
-printf '"CFBundleDisplayName" = "%s";\n"CFBundleName" = "%s";\n' "$APP_NAME" "$APP_NAME" \
-  >"${BUNDLE}/Contents/Resources/ko.lproj/InfoPlist.strings"
+# No localized ko.lproj/InfoPlist.strings: a Korean display name would make
+# Finder, Spotlight and Alfred show the Korean name again. The English
+# CFBundleName and CFBundleDisplayName in Info.plist are the only presented name.
 if git -C "$SOURCE_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   BUILD_NUMBER="$(git -C "$SOURCE_DIR" rev-list --count HEAD 2>/dev/null || printf '1')"
   plutil -replace CFBundleVersion -string "$BUILD_NUMBER" "${BUNDLE}/Contents/Info.plist"

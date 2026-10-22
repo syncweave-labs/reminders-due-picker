@@ -29,7 +29,7 @@ struct ContentView: View {
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button { sync.showsSettings.toggle() } label: {
-                    Label("Google Tasks", systemImage: "arrow.triangle.2.circlepath")
+                    Label("동기화", systemImage: "arrow.triangle.2.circlepath")
                 }
                 .popover(isPresented: $sync.showsSettings) { GoogleSyncView(sync: sync) }
             }
@@ -123,6 +123,9 @@ struct SidebarView: View {
                 SidebarRow(title: "날짜 없음", systemImage: "calendar.badge.minus", tint: .secondary,
                            count: model.count(for: .undated))
                     .tag(ReminderFilter.undated)
+                SidebarRow(title: "완료됨", systemImage: "checkmark.circle.fill", tint: .green,
+                           count: model.count(for: .completed))
+                    .tag(ReminderFilter.completed)
             }
             Section("목록") {
                 ForEach(model.lists) { list in
@@ -196,16 +199,36 @@ struct ReminderListView: View {
         .listStyle(.inset)
         .contextMenu(forSelectionType: String.self) { ids in
             if !ids.isEmpty {
-                Button("오늘") { apply(.today, to: ids) }
-                Button("내일") { apply(.tomorrow, to: ids) }
-                Button("모레") { apply(.dayAfterTomorrow, to: ids) }
-                Button("이번 주말") { apply(.thisWeekend, to: ids) }
-                Button("다음 주 월요일") { apply(.nextMonday, to: ids) }
+                if !model.isShowingCompleted {
+                    Button("오늘") { apply(.today, to: ids) }
+                    Button("내일") { apply(.tomorrow, to: ids) }
+                    Button("모레") { apply(.dayAfterTomorrow, to: ids) }
+                    Button("이번 주말") { apply(.thisWeekend, to: ids) }
+                    Button("다음 주 월요일") { apply(.nextMonday, to: ids) }
+                    Divider()
+                    Button("하루 미루기") { apply(.postponeDay, to: ids) }
+                    Button("일주일 미루기") { apply(.postponeWeek, to: ids) }
+                    Divider()
+                    Button("날짜 없음") { apply(DuePreset.clear, to: ids) }
+                    Divider()
+                }
+                if model.isShowingCompleted {
+                    Button("완료 해제") { model.selection = ids; model.setCompleted(false) }
+                } else {
+                    Button("완료로 표시") { model.selection = ids; model.setCompleted(true) }
+                }
+                Menu("우선순위") {
+                    ForEach(ReminderPriority.allCases) { priority in
+                        Button(priority.title) { model.selection = ids; model.setPriority(priority) }
+                    }
+                }
+                Menu("목록으로 이동") {
+                    ForEach(model.editableLists) { list in
+                        Button(list.title) { model.selection = ids; model.move(toList: list.id) }
+                    }
+                }
                 Divider()
-                Button("하루 미루기") { apply(.postponeDay, to: ids) }
-                Button("일주일 미루기") { apply(.postponeWeek, to: ids) }
-                Divider()
-                Button("날짜 없음") { apply(DuePreset.clear, to: ids) }
+                Button("삭제…", role: .destructive) { model.selection = ids; model.requestDelete() }
             }
         } primaryAction: { ids in
             if !ids.isEmpty {
@@ -231,6 +254,15 @@ struct ReminderListView: View {
         .searchable(text: $model.search, placement: .toolbar, prompt: "제목 검색")
         .navigationTitle(model.filterTitle)
         .navigationSubtitle(selectedCount == 0 ? "\(visibleCount)개" : "\(visibleCount)개 · \(selectedCount)개 선택")
+        .confirmationDialog("삭제할까요?", isPresented: Binding(
+            get: { model.pendingDelete != nil },
+            set: { if !$0 { model.cancelDelete() } }
+        ), presenting: model.pendingDelete) { pending in
+            Button("\(pending.count)개 삭제", role: .destructive) { model.confirmDelete() }
+            Button("취소", role: .cancel) { model.cancelDelete() }
+        } message: { pending in
+            Text("미리알림 \(pending.count)개를 삭제합니다. 이 앱에서는 되돌릴 수 없고, 다음 동기화 때 안전 게이트에 따라 Google Tasks·Notion 미러에도 반영됩니다.")
+        }
     }
 
     private func apply(_ preset: DuePreset, to ids: Set<String>) {
@@ -347,10 +379,16 @@ struct InspectorView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     SelectionSummary(model: model)
-                    DateInputSection(model: model, focus: focus)
-                    PresetSection(model: model)
-                    TimeSection(model: model)
-                    MonthCalendarView(model: model)
+                    if !model.isShowingCompleted {
+                        DateInputSection(model: model, focus: focus)
+                        PresetSection(model: model)
+                        TimeSection(model: model)
+                    }
+                    ManageSection(model: model)
+                    EditFieldsSection(model: model)
+                    if !model.isShowingCompleted {
+                        MonthCalendarView(model: model)
+                    }
                 }
                 .padding(16)
             }
@@ -706,6 +744,113 @@ struct TimeSection: View {
     }
 }
 
+// MARK: - Managing reminders
+
+struct ManageSection: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        let selected = model.selectedItems
+        let disabled = selected.isEmpty
+        let showingCompleted = model.isShowingCompleted
+        VStack(alignment: .leading, spacing: 8) {
+            SectionTitle(title: "관리", systemImage: "slider.horizontal.3")
+            HStack(spacing: 6) {
+                if showingCompleted {
+                    Button {
+                        model.setCompleted(false)
+                    } label: {
+                        Label("완료 해제", systemImage: "arrow.uturn.backward.circle")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(TileButtonStyle())
+                    .help("완료 해제 (⌘↩)")
+                } else {
+                    Button {
+                        model.setCompleted(true)
+                    } label: {
+                        Label("완료로 표시", systemImage: "checkmark.circle")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(TileButtonStyle())
+                    .help("완료로 표시 (⌘↩)")
+                }
+                Button(role: .destructive) {
+                    model.requestDelete()
+                } label: {
+                    Label("삭제", systemImage: "trash")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(TileButtonStyle())
+                .help("삭제 (⌘⌫) · 확인 후 되돌릴 수 없음")
+            }
+            .disabled(disabled)
+            HStack(spacing: 8) {
+                Text("우선순위").font(.callout).foregroundStyle(.secondary)
+                Picker("우선순위", selection: priorityBinding) {
+                    ForEach(ReminderPriority.allCases) { p in Text(p.title).tag(Optional(p)) }
+                    if sharedPriority == nil { Text("—").tag(Optional<ReminderPriority>.none) }
+                }
+                .labelsHidden()
+                .disabled(disabled)
+                Spacer()
+            }
+            HStack(spacing: 8) {
+                Text("목록 이동").font(.callout).foregroundStyle(.secondary)
+                Menu("목록 선택") {
+                    ForEach(model.editableLists) { list in
+                        Button(list.title) { model.move(toList: list.id) }
+                    }
+                }
+                .disabled(disabled || model.editableLists.isEmpty)
+                Spacer()
+            }
+        }
+        .help("고른 미리알림을 완료 처리하거나, 우선순위·목록을 바꾸거나, 삭제합니다. 반복 미리알림은 완료할 수 없어요.")
+    }
+
+    /// The priority all selected reminders share, or nil when they differ.
+    private var sharedPriority: ReminderPriority? {
+        let items = model.selectedItems
+        guard let first = items.first?.priority, items.allSatisfy({ $0.priority == first }) else { return nil }
+        return first
+    }
+
+    private var priorityBinding: Binding<ReminderPriority?> {
+        Binding(get: { sharedPriority }, set: { if let value = $0 { model.setPriority(value) } })
+    }
+}
+
+/// Title and notes editing for a single selected reminder.
+struct EditFieldsSection: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        if let item = model.singleSelected {
+            VStack(alignment: .leading, spacing: 7) {
+                SectionTitle(title: "제목·메모 편집", systemImage: "pencil")
+                TextField("제목", text: $model.editTitleDraft)
+                    .textFieldStyle(.roundedBorder)
+                TextEditor(text: $model.editNotesDraft)
+                    .frame(minHeight: 60, maxHeight: 120)
+                    .font(.callout)
+                    .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.primary.opacity(0.12)))
+                HStack {
+                    Button("저장") { model.saveEdit() }
+                        .keyboardShortcut("s", modifiers: .command)
+                        .disabled(model.editTitleDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    Button("되돌리기") { model.loadEditDraft() }
+                    Spacer()
+                }
+                Text("제목과 메모만 저장합니다. 날짜·목록·우선순위는 바뀌지 않아요.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+            .onAppear { model.loadEditDraft() }
+            .onChange(of: item.id) { _, _ in model.loadEditDraft() }
+        }
+    }
+}
+
 struct StatusBar: View {
     @ObservedObject var model: AppModel
 
@@ -789,7 +934,7 @@ struct AccessHelpView: View {
         case .failed(let detail):
             return "권한을 확인하지 못했어요: \(detail)"
         default:
-            return "시스템 설정 → 개인정보 보호 및 보안 → 미리알림에서 ‘미리알림 날짜’를 켠 뒤 ‘다시 확인’을 누르세요."
+            return "시스템 설정 → 개인정보 보호 및 보안 → 미리알림에서 ‘Reminders Due Picker’를 켠 뒤 ‘다시 확인’을 누르세요."
         }
     }
 }

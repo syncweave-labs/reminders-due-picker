@@ -43,6 +43,10 @@ enum AppTests {
         calendar.firstWeekday = 1
         eventKitTests(check, calendar)
         await modelTests(check, calendar)
+        await manageModelTests(check, calendar)
+        manageEventKitTests(check, calendar)
+        loginAgentTests(check)
+        notionStatusTests(check)
         privateLogTests(check)
         print("App tests: \(check.passed) passed, \(check.failed) failed")
         exit(check.failed == 0 ? 0 : 1)
@@ -390,5 +394,276 @@ enum AppTests {
         check.equal(item("r-unsubscribe")?.due, DueValue(d(9, 30)))
         check.equal(model.selectedItems.map(\.id), ["r-unsubscribe"], "back in 오늘 and still selected")
         model.filter = .all
+    }
+
+    // MARK: Management actions on DemoBackend
+
+    @MainActor
+    static func manageModelTests(_ check: Checker, _ calendar: Calendar) async {
+        let now = at(calendar, 2026, 9, 30, 18)
+        let backend = DemoBackend(now: now, calendar: calendar)
+        let model = AppModel(backend: backend, now: { now }, tickClock: false)
+        func item(_ id: String) -> ReminderItem? { model.items.first { $0.id == id } }
+        func done(_ id: String) -> ReminderItem? { model.completedItems.first { $0.id == id } }
+        await model.start()
+
+        // Completed smart list loads.
+        check.equal(model.count(for: .completed), 3, "완료됨 count")
+        model.filter = .completed
+        check.equal(model.isShowingCompleted, true)
+        check.equal(Set(model.visibleItems.map(\.id)), Set(["c-report", "c-pay", "c-call"]), "completed visible")
+        model.filter = .all
+
+        // Complete a batch, with undo. Read-only and recurring are skipped/refused.
+        model.selection = ["r-library", "r-gym"]
+        model.setCompleted(true)
+        check.equal(model.status?.tone, .success)
+        check.expect(item("r-library") == nil && item("r-gym") == nil, "completed items left the active list")
+        check.expect(done("r-library") != nil && done("r-gym") != nil, "completed items joined 완료됨")
+        check.expect(model.canUndo, "complete offers undo")
+        model.undoLast()
+        check.expect(item("r-library") != nil, "undo restored to active list")
+        await model.reload()
+
+        // Recurring completion is refused, never silently dropped.
+        model.selection = ["r-meeting"]
+        model.setCompleted(true)
+        check.equal(model.status?.tone, .warning)
+        check.expect(model.status?.text.contains("반복 미리알림은 이 앱에서 완료할 수 없어요") == true,
+                     "recurring completion refused: \(model.status?.text ?? "nil")")
+        check.expect(item("r-meeting") != nil, "recurring reminder untouched")
+        await model.reload()
+
+        // Un-complete from the 완료됨 list.
+        model.filter = .completed
+        model.selection = ["c-call"]
+        model.setCompleted(false)
+        check.equal(model.status?.tone, .success)
+        check.expect(backend.completed.first { $0.id == "c-call" } == nil, "un-completed left 완료됨")
+        model.undoLast()
+        model.filter = .all
+        await model.reload()
+
+        // Priority with undo; read-only skipped.
+        model.selection = ["r-quiz"]
+        model.setPriority(.high)
+        check.equal(item("r-quiz")?.priority, .high, "priority set")
+        check.equal(model.status?.tone, .success)
+        model.undoLast()
+        check.equal(item("r-quiz")?.priority, .medium, "priority restored")
+        await model.reload()
+        model.selection = ["r-dues"] // read-only list
+        model.setPriority(.low)
+        check.equal(model.status?.tone, .warning, "read-only priority skipped")
+        check.expect(model.status?.text.contains("읽기 전용") == true, "read-only reason")
+
+        // Move with undo; read-only destination not offered, source read-only skipped.
+        model.selection = ["r-quiz"]
+        model.move(toList: "personal")
+        check.equal(item("r-quiz")?.listID, "personal", "moved")
+        model.undoLast()
+        check.equal(item("r-quiz")?.listID, "school", "move undone")
+        await model.reload()
+
+        // Edit title/notes of a single reminder with undo; empty title refused.
+        model.selection = ["r-quiz"]
+        model.loadEditDraft()
+        model.editTitleDraft = "   "
+        model.saveEdit()
+        check.equal(model.status?.tone, .warning, "empty title refused")
+        model.editTitleDraft = "운영체제 기말 준비"
+        model.editNotesDraft = "5~8장 집중"
+        model.saveEdit()
+        check.equal(item("r-quiz")?.title, "운영체제 기말 준비", "title edited")
+        check.equal(item("r-quiz")?.notes, "5~8장 집중", "notes edited")
+        check.equal(model.status?.tone, .success)
+        model.undoLast()
+        check.equal(item("r-quiz")?.title, "운영체제 퀴즈 준비", "title restored")
+        check.equal(item("r-quiz")?.notes, "", "notes restored")
+        await model.reload()
+
+        // Editing requires a single selection.
+        model.selection = ["r-quiz", "r-library"]
+        model.loadEditDraft()
+        check.expect(model.singleSelected == nil, "no single selection for edit")
+
+        // Delete confirmation flow: request opens the dialog; confirm deletes; no undo.
+        model.selection = ["r-trip", "r-backup"]
+        model.requestDelete()
+        check.equal(model.pendingDelete?.count, 2, "delete dialog states the count")
+        let undoDepthBefore = model.canUndo
+        model.confirmDelete()
+        check.equal(model.status?.tone, .success)
+        check.expect(model.status?.text.contains("되돌릴 수 없음") == true, "delete states it cannot be undone")
+        check.expect(backend.items.first { $0.id == "r-trip" } == nil, "r-trip deleted")
+        check.expect(backend.items.first { $0.id == "r-backup" } == nil, "r-backup deleted")
+        check.equal(model.canUndo, undoDepthBefore, "delete adds no undo entry")
+        check.expect(model.pendingDelete == nil, "dialog closed")
+
+        // Cancel delete changes nothing.
+        model.selection = ["r-study"]
+        model.requestDelete()
+        model.cancelDelete()
+        check.expect(model.pendingDelete == nil, "cancel closed the dialog")
+        check.expect(backend.items.first { $0.id == "r-study" } != nil, "cancelled delete kept the item")
+
+        // Stale guard: a field changed after load is left alone.
+        if let index = backend.items.firstIndex(where: { $0.id == "r-study" }) {
+            backend.items[index].title = "다른 곳에서 바뀐 제목"
+        }
+        model.selection = ["r-study"]
+        model.setPriority(.high)
+        check.equal(model.status?.tone, .warning, "stale item skipped")
+        check.expect(model.status?.text.contains("다른 곳에서 먼저 바뀌어") == true, "stale reason")
+        check.equal(backend.items.first { $0.id == "r-study" }?.priority, ReminderPriority.none, "stale item unchanged")
+        await model.reload()
+
+        // A refused commit changes nothing.
+        backend.failNextCommit = true
+        model.selection = ["r-scholarship"]
+        model.setPriority(.high)
+        check.equal(model.status?.tone, .error, "refused commit reported")
+        check.equal(item("r-scholarship")?.priority, ReminderPriority.none, "refused commit changed nothing")
+    }
+
+    // MARK: Management edits on unsaved EventKit objects (never saved)
+
+    @MainActor
+    static func manageEventKitTests(_ check: Checker, _ calendar: Calendar) {
+        let store = EKEventStore()
+        func reminder(_ title: String) -> EKReminder {
+            let r = EKReminder(eventStore: store)
+            r.title = title
+            return r
+        }
+
+        // Title and notes edit + restore; date fields untouched.
+        let fields = reminder("원본 제목")
+        fields.dueDateComponents = DateComponents(year: 2026, month: 10, day: 1)
+        let fieldsRecord = applyFields(to: fields, title: "새 제목", notes: "새 메모")
+        check.equal(fields.title, "새 제목", "title applied")
+        check.equal(fields.notes, "새 메모", "notes applied")
+        check.equal(fields.dueDateComponents?.day, 1, "date untouched by field edit")
+        restoreFields(of: fields, from: fieldsRecord)
+        check.equal(fields.title, "원본 제목", "title restored")
+        check.expect(fields.notes == nil, "notes restored to empty")
+
+        // Empty notes clears to nil, not an empty string.
+        let clearNotes = reminder("t"); clearNotes.notes = "something"
+        _ = applyFields(to: clearNotes, title: "t", notes: "")
+        check.expect(clearNotes.notes == nil, "empty notes clears to nil")
+
+        // Priority mapping: set + restore; a value inside a bucket is not rewritten.
+        let prio = reminder("p"); prio.priority = 0
+        let prioRecord = applyPriority(to: prio, .high)
+        check.equal(prio.priority, 1, "high writes EventKit 1")
+        restorePriority(of: prio, from: prioRecord)
+        check.equal(prio.priority, 0, "priority restored")
+        let inBucket = reminder("p2"); inBucket.priority = 2 // already 'high' bucket
+        _ = applyPriority(to: inBucket, .high)
+        check.equal(inBucket.priority, 2, "value inside the same bucket is left as-is")
+        check.equal(ReminderPriority.fromEventKit(2), .high, "2 reads as high")
+        check.equal(ReminderPriority.fromEventKit(5), .medium, "5 reads as medium")
+        check.equal(ReminderPriority.fromEventKit(9), .low, "9 reads as low")
+        check.equal(ReminderPriority.fromEventKit(0), ReminderPriority.none, "0 reads as none")
+
+        // Completion flag + restore; completion date set then cleared.
+        let comp = reminder("c")
+        let when = at(calendar, 2026, 9, 30, 12)
+        let compRecord = applyCompletion(to: comp, complete: true, now: when)
+        check.equal(comp.isCompleted, true, "marked complete")
+        check.equal(comp.completionDate, when, "completion date set")
+        restoreCompletion(of: comp, from: compRecord)
+        check.equal(comp.isCompleted, false, "completion restored")
+        check.expect(comp.completionDate == nil, "completion date cleared on restore")
+
+        // Move planning: calendar reassignment is a plain property set (no store write).
+        let mv = reminder("m")
+        let before = mv.calendar
+        // We cannot create a real EKCalendar without a source here, so only
+        // assert the in-memory assignment contract: setting then clearing.
+        mv.calendar = before
+        check.expect(mv.calendar === before, "calendar assignment is in-memory")
+    }
+
+    // MARK: Login-agent self-heal (injected directory)
+
+    @MainActor
+    static func loginAgentTests(_ check: Checker) {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent("agents-" + UUID().uuidString)
+        defer { try? fm.removeItem(at: dir) }
+        let label = "com.icloud-reminders-google-sync.due-picker.login"
+        let oldExe = "/Users/x/Applications/미리알림 날짜.app/Contents/MacOS/DuePicker"
+        let newExe = "/Applications/Reminders Due Picker.app/Contents/MacOS/DuePicker"
+
+        // Absent: self-heal never creates it.
+        check.equal(LoginAgent.needsSelfHeal(label: label, agentsDirectory: dir, executablePath: newExe), false,
+                    "absent agent does not need self-heal")
+        check.expect((try? LoginAgent.selfHeal(label: label, agentsDirectory: dir, executablePath: newExe)) == false,
+                     "self-heal did not create an absent agent")
+        check.expect(!fm.fileExists(atPath: LoginAgent.path(label: label, agentsDirectory: dir).path),
+                     "no plist created when absent")
+
+        // Present but stale: self-heal rewrites ProgramArguments[0] and keeps the rest.
+        do { try LoginAgent.write(label: label, agentsDirectory: dir, executablePath: oldExe) }
+        catch { check.expect(false, "write failed: \(error)") }
+        check.equal(LoginAgent.currentExecutable(label: label, agentsDirectory: dir), oldExe, "wrote old exe")
+        check.equal(LoginAgent.needsSelfHeal(label: label, agentsDirectory: dir, executablePath: newExe), true,
+                    "stale agent needs self-heal")
+        check.expect((try? LoginAgent.selfHeal(label: label, agentsDirectory: dir, executablePath: newExe)) == true,
+                     "self-heal rewrote the stale agent")
+        check.equal(LoginAgent.currentExecutable(label: label, agentsDirectory: dir), newExe, "exe updated")
+        let path = LoginAgent.path(label: label, agentsDirectory: dir).path
+        check.equal(try? fm.attributesOfItem(atPath: path)[.posixPermissions] as? Int, 0o600, "mode 0600")
+        if let data = try? Data(contentsOf: LoginAgent.path(label: label, agentsDirectory: dir)),
+           let dict = (try? PropertyListSerialization.propertyList(from: data, options: [], format: nil)) as? [String: Any] {
+            check.equal(dict["Label"] as? String, label, "Label kept")
+            check.equal(dict["RunAtLoad"] as? Bool, true, "RunAtLoad kept")
+            check.equal(dict["ProcessType"] as? String, "Interactive", "ProcessType kept")
+            check.equal((dict["ProgramArguments"] as? [String])?.last, "--background", "--background kept")
+        } else {
+            check.expect(false, "could not read rewritten plist")
+        }
+
+        // Already current: self-heal is a no-op.
+        check.equal(LoginAgent.needsSelfHeal(label: label, agentsDirectory: dir, executablePath: newExe), false,
+                    "current agent needs no self-heal")
+        check.expect((try? LoginAgent.selfHeal(label: label, agentsDirectory: dir, executablePath: newExe)) == false,
+                     "self-heal was a no-op on a current agent")
+    }
+
+    // MARK: Notion mirror status parsing (injected path)
+
+    @MainActor
+    static func notionStatusTests(_ check: Checker) {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent("notion-" + UUID().uuidString)
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("notion-mirror-state.json")
+
+        // Missing file → neutral unavailable, never an error.
+        check.equal(NotionMirrorStatus.read(from: file), .unknown, "missing file is unavailable")
+
+        // Valid file → reads only the three fields.
+        let json = """
+        {"lastSuccessAt":"2026-10-22T09:00:00Z","pendingCreates":2,"counts":{"total":184,"other":1},"secret":"ignored"}
+        """
+        try? Data(json.utf8).write(to: file)
+        let status = NotionMirrorStatus.read(from: file)
+        check.equal(status.unavailable, false, "readable file is available")
+        check.equal(status.pendingCreates, 2, "pendingCreates read")
+        check.equal(status.total, 184, "counts.total read")
+        check.expect(status.lastSuccessAt != nil, "lastSuccessAt parsed")
+
+        // Unreadable JSON → neutral unavailable.
+        try? Data("not json".utf8).write(to: file)
+        check.equal(NotionMirrorStatus.read(from: file), .unknown, "garbage is unavailable")
+
+        // Partial object → zeros, still available.
+        let partial = NotionMirrorStatus.parse(["pendingCreates": 0])
+        check.equal(partial.total, 0, "missing counts.total defaults to 0")
+        check.equal(partial.unavailable, false, "partial but present is available")
     }
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs the 미리알림 날짜 tests. The date logic runs anywhere Swift does (CI
+# Runs the Reminders Due Picker tests. The date logic runs anywhere Swift does (CI
 # runs it on Linux); the EventKit and app-model tests need macOS. Neither
 # reads or writes real reminders: EventKit tests edit unsaved in-memory objects.
 set -euo pipefail
@@ -37,10 +37,12 @@ if [ "$(uname -s)" = "Darwin" ]; then
     "${PROJECT_DIR}/Sources/ReminderStore.swift" \
     "${PROJECT_DIR}/Sources/AppModel.swift" \
     "${PROJECT_DIR}/Sources/SyncFiles.swift" \
+    "${PROJECT_DIR}/Sources/SyncSupport.swift" \
     "${PROJECT_DIR}/Tools/DemoBackend.swift" \
     "${PROJECT_DIR}/Tests/AppTests/AppTests.swift" \
     -o "${WORK_DIR}/app-tests"
   "${WORK_DIR}/app-tests"
+  bash "${SCRIPT_DIR}/test-install-migration.sh"
 else
   printf 'SKIP: EventKit and app-model tests need macOS.\n'
 fi

@@ -44,12 +44,12 @@ struct DuePickerApp: App {
     @StateObject private var model = AppModel(backend: EventKitBackend())
 
     var body: some Scene {
-        Window("미리알림 날짜", id: "main") {
+        Window("Reminders Due Picker", id: "main") {
             ContentView(model: model)
         }
         .defaultSize(width: 1220, height: 880)
         .commands { DueCommands(model: model) }
-        MenuBarExtra("미리알림 날짜", systemImage: "calendar.badge.clock") {
+        MenuBarExtra("Reminders Due Picker", systemImage: "calendar.badge.clock") {
             SyncMenu(sync: .shared)
         }
     }
@@ -60,7 +60,7 @@ struct SyncMenu: View {
     @Environment(\.openWindow) private var openWindow
     var body: some View {
         Text(sync.message)
-        Button("미리알림 날짜 열기") {
+        Button("Reminders Due Picker 열기") {
             NSApp.setActivationPolicy(.regular)
             openWindow(id: "main")
             NSApp.activate(ignoringOtherApps: true)
@@ -125,6 +125,27 @@ struct DueCommands: Commands {
             Divider()
             Button("새로 고침") { Task { await model.reload() } }
                 .keyboardShortcut("r", modifiers: .command)
+        }
+        CommandMenu("관리") {
+            Button(model.isShowingCompleted ? "완료 해제" : "완료로 표시") {
+                model.setCompleted(!model.isShowingCompleted)
+            }
+            .keyboardShortcut(.return, modifiers: .command)
+            .disabled(!model.hasSelection)
+            Divider()
+            Menu("우선순위") {
+                Button("없음") { model.setPriority(.none) }
+                Button("낮음") { model.setPriority(.low) }
+                Button("중간") { model.setPriority(.medium) }
+                Button("높음") { model.setPriority(.high) }
+            }
+            .disabled(!model.hasSelection)
+            Button("제목·메모 편집 저장") { model.saveEdit() }
+                .disabled(model.singleSelected == nil)
+            Divider()
+            Button("삭제…") { model.requestDelete() }
+                .keyboardShortcut(.delete, modifiers: .command)
+                .disabled(!model.hasSelection)
         }
     }
 }
