@@ -1,4 +1,4 @@
-// DueCore.swift — the pure date logic behind 미리알림 날짜.
+// DueCore.swift — the pure date logic behind Reminders Due Picker.
 //
 // Foundation only: no EventKit, AppKit or SwiftUI. The same file is compiled
 // into the app and into the test runner (scripts/test-due-picker.sh, which CI

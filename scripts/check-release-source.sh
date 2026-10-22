@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Release-source gate for 미리알림 날짜. scripts/install-due-picker-app.sh runs
+# Release-source gate for Reminders Due Picker. scripts/install-due-picker-app.sh runs
 # it before it builds or replaces anything, so only a clean, pushed main commit
 # is ever installed.
 set -euo pipefail
