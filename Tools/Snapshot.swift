@@ -73,10 +73,23 @@ enum SnapshotTool {
                    to: output.appendingPathComponent("due-picker-inspector.png"))
         renderView(InspectorPreview(model: multiple), appearance: .darkAqua, size: NSSize(width: 390, height: 880),
                    to: output.appendingPathComponent("due-picker-inspector-multiple-dark.png"))
-        renderView(GoogleSyncView(sync: GoogleSync(demo: true)), appearance: .aqua, size: NSSize(width: 504, height: 390),
+        renderView(GoogleSyncView(sync: GoogleSync(demo: true)), appearance: .aqua, size: NSSize(width: 504, height: 720),
                    to: output.appendingPathComponent("google-sync-light.png"))
-        renderView(GoogleSyncView(sync: GoogleSync(demo: true)), appearance: .darkAqua, size: NSSize(width: 504, height: 390),
+        renderView(GoogleSyncView(sync: GoogleSync(demo: true)), appearance: .darkAqua, size: NSSize(width: 504, height: 720),
                    to: output.appendingPathComponent("google-sync-dark.png"))
+
+        // Delete confirmation copy (light and dark), rendered standalone.
+        renderView(DeleteConfirmationPreview(count: 3), appearance: .aqua, size: NSSize(width: 504, height: 240),
+                   to: output.appendingPathComponent("due-picker-delete-confirm-light.png"))
+        renderView(DeleteConfirmationPreview(count: 3), appearance: .darkAqua, size: NSSize(width: 504, height: 240),
+                   to: output.appendingPathComponent("due-picker-delete-confirm-dark.png"))
+
+        // Inspector over the 완료됨 smart list: completion toggle flips to 완료 해제.
+        let completedModel = makeModel()
+        completedModel.filter = .completed
+        completedModel.selection = ["c-report"]
+        renderView(InspectorPreview(model: completedModel), appearance: .aqua, size: NSSize(width: 390, height: 880),
+                   to: output.appendingPathComponent("due-picker-inspector-completed.png"))
 
         let policy = SyncPolicyModel(sync: GoogleSync(demo: true)); policy.seedDemo()
         renderView(SyncPolicyView(model: policy, autoLoad: false), appearance: .aqua, size: NSSize(width: 564, height: 540),
@@ -155,7 +168,7 @@ enum SnapshotTool {
         // window's, so pin both to render the same thing on any system setting.
         NSApp.appearance = NSAppearance(named: appearance)
         window.appearance = NSAppearance(named: appearance)
-        window.title = "미리알림 날짜"
+        window.title = "Reminders Due Picker"
         let hosting = NSHostingView(rootView: ContentView(model: model, sync: GoogleSync(demo: true)))
         hosting.sceneBridgingOptions = [.toolbars, .title]
         window.contentView = hosting
@@ -174,4 +187,29 @@ struct InspectorPreview: View {
     @FocusState private var focus: FocusTarget?
 
     var body: some View { InspectorView(model: model, focus: $focus) }
+}
+
+/// A standalone rendering of the delete-confirmation copy, since the live
+/// `.confirmationDialog` sheet does not draw into an offscreen bitmap.
+struct DeleteConfirmationPreview: View {
+    let count: Int
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Label("삭제할까요?", systemImage: "trash")
+                .font(.title2.weight(.semibold))
+            Text("미리알림 \(count)개를 삭제합니다. 이 앱에서는 되돌릴 수 없고, 다음 동기화 때 안전 게이트에 따라 Google Tasks·Notion 미러에도 반영됩니다.")
+                .font(.callout)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Spacer()
+                Button("취소") {}
+                Button("\(count)개 삭제") {}
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
+            }
+        }
+        .padding(22)
+        .frame(width: 460, alignment: .leading)
+    }
 }
