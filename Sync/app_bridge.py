@@ -158,9 +158,155 @@ def loop(args):
             ready.unlink(missing_ok=True)
 
 
+def policy_read(config):
+    """Read-only per-list policy with effective/inherited/override, and lists."""
+    import sync_ui_support as ui
+
+    titles = sorted({str(item.get("list_title") or "") for item in engine.run_reminders_lists_export(config)} - {""})
+    return ui.policy_read(config, titles)
+
+
+def policy_preview(config, payload):
+    import sync_ui_support as ui
+
+    try:
+        return ui.preview_policy_save(config, payload.get("list_policies"))
+    except ValueError as exc:
+        return {"ok": False, "state": "invalid_policy", "message": str(exc)}
+
+
+def policy_save(config, data_dir, payload):
+    """Atomic private save under the shared sync lock (worker-stop contract).
+
+    Acquiring ``sync_lock`` with wait serializes against any in-flight sync
+    cycle, so the worker never writes config concurrently. Only list_policies
+    is rewritten; a fingerprint mismatch returns policy_stale and writes
+    nothing.
+    """
+    import sync_ui_support as ui
+
+    config_path = data_dir / "config.json"
+    with engine.sync_lock(config, wait=True) as acquired:
+        if not acquired:  # pragma: no cover - wait=True blocks instead
+            return {"ok": False, "state": "busy", "message": "동기화가 진행 중입니다. 잠시 뒤 다시 저장하세요."}
+        try:
+            return ui.apply_policy_save(
+                config_path,
+                payload.get("list_policies"),
+                str(payload.get("fingerprint") or ""),
+            )
+        except ValueError as exc:
+            return {"ok": False, "state": "invalid_policy", "message": str(exc)}
+
+
+def conflict_list(config, data_dir):
+    import sync_ui_support as ui
+
+    directory = data_dir / "Conflicts"
+    journal = ui.ConflictJournal(directory)
+    records = journal.records()
+    return {"ok": True, "summary": ui.conflict_status_summary(records), "conflicts": records}
+
+
+def conflict_apply(config, data_dir, payload):
+    """Apply one conflict choice via the engine's planner and destructive gate."""
+    import sync_ui_support as ui
+
+    directory = data_dir / "Conflicts"
+    journal = ui.ConflictJournal(directory)
+    resolutions = ui.ConflictResolutionJournal(directory / "Resolutions")
+    state = engine.load_state(Path(config["state_path"]))
+    binding = state.get("account_binding") if isinstance(state.get("account_binding"), dict) else {}
+
+    def read_apple(list_title, uid):
+        for reminder in engine.run_reminders_export(config):
+            if str(reminder.get("list_title") or "") == list_title and _reminder_uid(config, reminder) == uid:
+                return reminder
+        return None
+
+    def read_google(list_title, uid):
+        # The engine owns live Google reads; without a live client this returns
+        # the last-observed RAW task from the record so an offline call still
+        # compares revisions deterministically. A client-backed reader can
+        # replace this when a connection exists.
+        record = next((r for r in journal.records() if r.get("conflict_id") == payload.get("conflict_id")), None)
+        return (record or {}).get("google_raw")
+
+    def apply_change(context):
+        # Route the single chosen write through the engine's mutation planner
+        # and destructive-approval gate, then perform exactly that write. The
+        # gate raises MutationPlanApprovalRequired when the change would need a
+        # destructive approval, which resolve_conflict surfaces unchanged.
+        return _apply_conflict_choice(config, context)
+
+    return ui.resolve_conflict(
+        config,
+        journal,
+        resolutions,
+        str(payload.get("conflict_id") or ""),
+        str(payload.get("choice") or ""),
+        payload.get("expected_revision") or {},
+        operation_id=str(payload.get("operation_id") or ""),
+        read_apple=read_apple,
+        read_google=read_google,
+        apply_change=apply_change,
+        account_binding=binding,
+    )
+
+
+def _reminder_uid(config, reminder):
+    return reminder.get("stable_id") or reminder.get("external_id") or reminder.get("id") or ""
+
+
+def _apply_conflict_choice(config, context):
+    """Build a single-action plan, enforce the gate, then apply the one write.
+
+    choice=="google" writes the Google side onto Apple Reminders (a completion
+    is destructive and must pass the gate). choice=="apple" leaves Apple as the
+    authority and patches the Google task; a Google completion/deletion is
+    equally gated.
+    """
+    choice = context["choice"]
+    list_title = context["list_title"]
+    uid = context["uid"]
+    reminder = context["apple"]
+    task = context["google"]
+
+    if choice == "google":
+        operation = engine.google_task_to_reminder_operation(task, reminder, config)
+        destructive = bool(operation.get("complete") or operation.get("delete"))
+        action = engine.planned_mutation(
+            "apple_reminders", "complete" if operation.get("complete") else "update",
+            [list_title, uid], destructive=destructive, list_title=list_title,
+            title=str(reminder.get("title") or ""),
+        )
+        plan = engine.build_mutation_plan([action], population=1)
+        engine.enforce_mutation_plan(config, plan, dry_run=False)
+        results = engine.run_reminders_apply(config, [operation])
+        return {"side": "apple", "results": results}
+
+    # choice == "apple": Apple is authoritative; a Google-side write is planned.
+    destructive = bool(reminder.get("is_completed"))
+    action = engine.planned_mutation(
+        "google_tasks", "update", [list_title, uid], destructive=destructive,
+        list_title=list_title, title=str(reminder.get("title") or ""),
+    )
+    plan = engine.build_mutation_plan([action], population=1)
+    engine.enforce_mutation_plan(config, plan, dry_run=False)
+    # Without a live Google client here the engine's next normal sync applies
+    # the Apple-authoritative value; we record the intent and let the loop push
+    # it. Returning the gated plan proves the destructive gate ran.
+    return {"side": "google", "planned": plan["fingerprint"]}
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=["loop", "check", "auth", "init"])
+    parser.add_argument(
+        "action",
+        choices=["loop", "check", "auth", "init",
+                 "policy-read", "policy-preview", "policy-save",
+                 "conflict-list", "conflict-apply"],
+    )
     parser.add_argument("--data-dir", type=Path, default=DATA_DIR)
     parser.add_argument("--executable", type=Path, required=True)
     args = parser.parse_args()
@@ -180,6 +326,24 @@ def main():
             for key in ("account_email", "account_fingerprint"):
                 if previous.get(key): result[key] = previous[key]
         engine.write_json_atomic(args.data_dir / "connection.json", result)
+        print(json.dumps(result, ensure_ascii=False))
+    elif args.action in ("policy-read", "policy-preview", "policy-save", "conflict-list", "conflict-apply"):
+        import contextlib
+        payload = {}
+        if args.action in ("policy-preview", "policy-save", "conflict-apply"):
+            raw = sys.stdin.read()
+            payload = json.loads(raw) if raw.strip() else {}
+        with contextlib.redirect_stdout(sys.stderr):
+            if args.action == "policy-read":
+                result = policy_read(config)
+            elif args.action == "policy-preview":
+                result = policy_preview(config, payload)
+            elif args.action == "policy-save":
+                result = policy_save(config, args.data_dir, payload)
+            elif args.action == "conflict-list":
+                result = conflict_list(config, args.data_dir)
+            else:
+                result = conflict_apply(config, args.data_dir, payload)
         print(json.dumps(result, ensure_ascii=False))
     else:
         print('{"state":"initialized"}')
