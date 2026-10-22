@@ -9,6 +9,8 @@ import SwiftUI
 final class GoogleSync: ObservableObject {
     static let shared = GoogleSync()
     @Published var showsSettings = false
+    @Published var showsPolicy = false
+    @Published var showsConflicts = false
     @Published private(set) var enabled: Bool
     @Published private(set) var busy = false
     @Published private(set) var state = "disconnected"
@@ -65,6 +67,48 @@ final class GoogleSync: ObservableObject {
 
     private func privateLog() throws -> FileHandle {
         try SyncFiles.openPrivateLog(in: dataDirectory)
+    }
+
+    /// Run one narrow IPC action (policy/conflict) off the main actor and return
+    /// its parsed JSON object. stdout carries only the small JSON result; the
+    /// bridge redirects engine chatter (OAuth URLs, paths) to the private log.
+    /// This never writes real reminders: policy actions touch config only, and
+    /// conflict apply goes through the engine's planner and destructive gate.
+    func runIPC(_ action: String, input: [String: Any]? = nil) async -> [String: Any] {
+        if demo { return ["ok": false, "state": "demo"] }
+        do {
+            let process = try makeProcess(action)
+            let outPipe = Pipe()
+            let log = try privateLog()
+            process.standardOutput = outPipe
+            process.standardError = log
+            var inPipe: Pipe?
+            if let input {
+                let data = try JSONSerialization.data(withJSONObject: input)
+                let pipe = Pipe()
+                process.standardInput = pipe
+                inPipe = pipe
+                try process.run()
+                pipe.fileHandleForWriting.write(data)
+                try? pipe.fileHandleForWriting.close()
+            } else {
+                try process.run()
+            }
+            _ = inPipe
+            let result: (Data, Int32) = await Task.detached {
+                let out = outPipe.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                return (out, process.terminationStatus)
+            }.value
+            try? log.close()
+            guard result.1 == 0,
+                  let json = try JSONSerialization.jsonObject(with: result.0) as? [String: Any] else {
+                return ["ok": false, "state": "failed", "message": "응답을 읽지 못했습니다."]
+            }
+            return json
+        } catch {
+            return ["ok": false, "state": "failed", "message": error.localizedDescription]
+        }
     }
 
     private func startWorker() {
@@ -241,6 +285,15 @@ struct GoogleSyncView: View {
                     .disabled(!sync.enabled)
                 if sync.busy { ProgressView().controlSize(.small) }
             }.disabled(sync.busy)
+            Divider()
+            HStack {
+                Button("목록별 정책") { sync.showsPolicy = true }
+                    .popover(isPresented: $sync.showsPolicy) { SyncPolicyView(model: SyncPolicyModel(sync: sync)) }
+                Button("충돌 검토") { sync.showsConflicts = true }
+                    .popover(isPresented: $sync.showsConflicts) { ConflictReviewView(model: ConflictReviewModel(sync: sync)) }
+            }
+            Text("정책 저장은 설정만 바꾸며 미리알림이나 Google Tasks를 즉시 변경하지 않습니다.")
+                .font(.caption2).foregroundStyle(.secondary)
         }
         .padding(22).frame(width: 460)
     }

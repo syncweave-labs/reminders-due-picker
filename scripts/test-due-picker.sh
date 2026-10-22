@@ -17,7 +17,7 @@ trap 'rm -rf "$WORK_DIR"' EXIT
 
 SYNC_PYTHON="${SYNC_PYTHON:-$(command -v python3)}"
 if [ -x /opt/homebrew/bin/python3 ]; then SYNC_PYTHON=/opt/homebrew/bin/python3; fi
-(cd "${PROJECT_DIR}/Sync" && "$SYNC_PYTHON" -B -m unittest test_icloud_reminders_google_sync.py test_app_bridge.py)
+(cd "${PROJECT_DIR}/Sync" && "$SYNC_PYTHON" -B -m unittest test_icloud_reminders_google_sync.py test_app_bridge.py test_sync_ui_support.py)
 
 "$SWIFTC" -swift-version 5 -Onone \
   "${PROJECT_DIR}/Sources/DueCore.swift" \

@@ -145,4 +145,102 @@ bridge.loop(argparse.Namespace(config=__import__('sys').argv[1]))
             self.assertFalse(engine.read_json(folder / "config.json")["use_adc"])
 
 
+class U09BridgeTests(unittest.TestCase):
+    """U09 policy and conflict IPC: narrow actions, no arbitrary paths/keys,
+    worker-stop/lock contract, planner-routed resolution with the gate."""
+
+    def _config(self, tmp):
+        config = engine.default_config()
+        config.update(
+            state_path=str(tmp / "state.json"),
+            status_path=str(tmp / "status.json"),
+            bidirectional=True, delete_stale=False, conflict_policy="skip",
+            list_policies={}, include_lists=[],
+            max_destructive_changes=0, max_destructive_ratio=0.0,
+        )
+        return config
+
+    def test_policy_read_uses_signed_lists_export_and_shows_effective(self):
+        with tempfile.TemporaryDirectory() as t:
+            tmp = Path(t)
+            config = self._config(tmp)
+            with patch.object(engine, "run_reminders_lists_export", return_value=[{"list_title": "Work"}, {"list_title": "Home"}]):
+                payload = bridge.policy_read(config)
+            titles = {row["list_title"] for row in payload["lists"]}
+            self.assertEqual(titles, {"Work", "Home"})
+            self.assertTrue(payload["name_keyed"])
+
+    def test_policy_save_is_serialized_by_the_sync_lock_and_writes_config_only(self):
+        with tempfile.TemporaryDirectory() as t:
+            tmp = Path(t)
+            config = self._config(tmp)
+            path = tmp / "config.json"
+            engine.write_json_atomic(path, config)
+            import sync_ui_support as ui
+            fp = ui.config_fingerprint(config)
+            result = bridge.policy_save(config, tmp, {"list_policies": {"Work": {"direction": "apple_to_google"}}, "fingerprint": fp})
+            self.assertTrue(result["ok"])
+            saved = json.loads(path.read_text())
+            self.assertEqual(saved["list_policies"], {"Work": {"direction": "apple_to_google"}})
+            self.assertFalse((tmp / "state.json").exists())
+
+    def test_policy_save_rejects_unknown_keys(self):
+        with tempfile.TemporaryDirectory() as t:
+            tmp = Path(t)
+            config = self._config(tmp)
+            engine.write_json_atomic(tmp / "config.json", config)
+            import sync_ui_support as ui
+            result = bridge.policy_save(config, tmp, {"list_policies": {"Work": {"evil": 1}}, "fingerprint": ui.config_fingerprint(config)})
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["state"], "invalid_policy")
+
+    def test_conflict_apply_routes_through_the_destructive_gate(self):
+        with tempfile.TemporaryDirectory() as t:
+            tmp = Path(t)
+            config = self._config(tmp)
+            engine.write_json_atomic(tmp / "config.json", config)
+            engine.write_json_atomic(tmp / "state.json", {"account_binding": {"version": 1, "apple": "a", "google": "g"}})
+            import sync_ui_support as ui
+            reminder = {"id": "u1", "stable_id": "u1", "external_id": "u1", "list_title": "Work",
+                        "title": "R", "notes": "", "due_date": "2026-10-20", "is_completed": False,
+                        "modified_at": "2026-10-20T09:00:00Z"}
+            # A completed Google task -> writing it to Apple is a completion =
+            # destructive, so the (tight) gate must block it, not bypass it.
+            task = {"id": "g1", "title": "R2", "notes": "", "due": "2026-10-22T00:00:00Z", "status": "completed", "etag": "e1"}
+            journal = ui.ConflictJournal(tmp / "Conflicts")
+            rec = ui.build_conflict_record({"apple": "a", "google": "g"}, "Work", "u1", reminder, task)
+            journal.observe(rec)
+
+            enforce_calls = []
+            real_enforce = engine.enforce_mutation_plan
+            def spy_enforce(cfg, plan, **kw):
+                enforce_calls.append(plan)
+                return real_enforce(cfg, plan, **kw)
+            with patch.object(engine, "run_reminders_export", return_value=[reminder]), \
+                 patch.object(engine, "enforce_mutation_plan", side_effect=spy_enforce), \
+                 patch.object(engine, "write_sync_status"):
+                payload = {"conflict_id": rec["conflict_id"], "choice": "google",
+                           "expected_revision": {"apple": reminder["modified_at"], "google": task["etag"]},
+                           "operation_id": "op-bridge"}
+                result = bridge.conflict_apply(config, tmp, payload)
+            # The gate ran (plan built) and blocked the destructive completion.
+            self.assertTrue(enforce_calls)
+            self.assertEqual(result["state"], "blocked_mutation_plan")
+            # The conflict stays open because nothing was applied.
+            self.assertIn(rec["conflict_id"], {r["conflict_id"] for r in ui.ConflictJournal(tmp / "Conflicts").records()})
+
+    def test_conflict_list_returns_counts_and_records(self):
+        with tempfile.TemporaryDirectory() as t:
+            tmp = Path(t)
+            config = self._config(tmp)
+            import sync_ui_support as ui
+            journal = ui.ConflictJournal(tmp / "Conflicts")
+            journal.observe(ui.build_conflict_record({"apple": "a", "google": "g"}, "Work", "u1",
+                {"title": "x", "modified_at": "m"}, {"title": "y", "etag": "e"}))
+            payload = bridge.conflict_list(config, tmp)
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["summary"]["total"], 1)
+            self.assertEqual(len(payload["conflicts"]), 1)
+
+
 if __name__ == "__main__": unittest.main()

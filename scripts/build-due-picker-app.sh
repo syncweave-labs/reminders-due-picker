@@ -95,6 +95,8 @@ SOURCES=(
   "${PROJECT_DIR}/Sources/AppModel.swift"
   "${PROJECT_DIR}/Sources/Views.swift"
   "${PROJECT_DIR}/Sources/GoogleSync.swift"
+  "${PROJECT_DIR}/Sources/SyncPolicy.swift"
+  "${PROJECT_DIR}/Sources/SyncConflicts.swift"
   "${PROJECT_DIR}/Sources/SyncFiles.swift"
   "${PROJECT_DIR}/Sources/SyncApplyJournal.swift"
 )
@@ -128,6 +130,7 @@ cp "${PROJECT_DIR}/Info.plist" "${BUNDLE}/Contents/Info.plist"
 cp "${WORK_DIR}/AppIcon.icns" "${BUNDLE}/Contents/Resources/AppIcon.icns"
 mkdir -p "${BUNDLE}/Contents/Resources/Sync"
 cp "${PROJECT_DIR}/Sync/icloud_reminders_google_sync.py" "${PROJECT_DIR}/Sync/app_bridge.py" \
+   "${PROJECT_DIR}/Sync/sync_ui_support.py" \
    "${PROJECT_DIR}/Sync/LICENSE" "${PROJECT_DIR}/Sync/ORIGIN.md" "${BUNDLE}/Contents/Resources/Sync/"
 printf 'APPL????' >"${BUNDLE}/Contents/PkgInfo"
 printf '"CFBundleDisplayName" = "%s";\n"CFBundleName" = "%s";\n' "$APP_NAME" "$APP_NAME" \
