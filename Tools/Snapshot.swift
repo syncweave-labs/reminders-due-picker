@@ -77,6 +77,20 @@ enum SnapshotTool {
                    to: output.appendingPathComponent("google-sync-light.png"))
         renderView(GoogleSyncView(sync: GoogleSync(demo: true)), appearance: .darkAqua, size: NSSize(width: 504, height: 390),
                    to: output.appendingPathComponent("google-sync-dark.png"))
+
+        let policy = SyncPolicyModel(sync: GoogleSync(demo: true)); policy.seedDemo()
+        renderView(SyncPolicyView(model: policy, autoLoad: false), appearance: .aqua, size: NSSize(width: 564, height: 540),
+                   to: output.appendingPathComponent("sync-policy-light.png"))
+        let policyDark = SyncPolicyModel(sync: GoogleSync(demo: true)); policyDark.seedDemo()
+        renderView(SyncPolicyView(model: policyDark, autoLoad: false), appearance: .darkAqua, size: NSSize(width: 564, height: 540),
+                   to: output.appendingPathComponent("sync-policy-dark.png"))
+
+        let conflicts = ConflictReviewModel(sync: GoogleSync(demo: true)); conflicts.seedDemo()
+        renderView(ConflictReviewView(model: conflicts, autoLoad: false), appearance: .aqua, size: NSSize(width: 604, height: 480),
+                   to: output.appendingPathComponent("sync-conflicts-light.png"))
+        let conflictsDark = ConflictReviewModel(sync: GoogleSync(demo: true)); conflictsDark.seedDemo()
+        renderView(ConflictReviewView(model: conflictsDark, autoLoad: false), appearance: .darkAqua, size: NSSize(width: 604, height: 480),
+                   to: output.appendingPathComponent("sync-conflicts-dark.png"))
         exit(0)
     }
 
