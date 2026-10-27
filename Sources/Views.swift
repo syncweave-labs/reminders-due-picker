@@ -44,6 +44,19 @@ final class HoverState: ObservableObject {
     @Published var isHovering = false
 }
 
+/// Whether the reminder list has had rows yet; ReminderListView uses it to
+/// recreate a list that was created empty exactly once, when its first rows
+/// arrive. Nothing is published: the latch only feeds the list's identity in
+/// the same update that sets it.
+final class ListRowsLatch: ObservableObject {
+    private(set) var hasHadRows = false
+
+    func identity(isEmpty: Bool) -> Bool {
+        if !isEmpty { hasHadRows = true }
+        return hasHadRows
+    }
+}
+
 struct MainView: View {
     @ObservedObject var model: AppModel
     @FocusState private var focus: FocusTarget?
@@ -172,6 +185,7 @@ struct SidebarRow: View {
 struct ReminderListView: View {
     @ObservedObject var model: AppModel
     var focus: FocusState<FocusTarget?>.Binding
+    @StateObject private var rowsLatch = ListRowsLatch()
 
     var body: some View {
         let sections = model.sections
@@ -236,6 +250,15 @@ struct ReminderListView: View {
                 model.focusRequest = .dateInput
             }
         }
+        // The list exists before the first load finishes, so it usually starts
+        // empty, and a macOS List created empty does not measure the first rows
+        // it receives: they kept the table's 24 pt default instead of the 45 pt
+        // a two-line row needs, clipped, until a resize re-measured them. Later
+        // updates are measured. So the list takes a new identity once, when its
+        // first rows arrive, which creates the table together with them. Doing
+        // it on every empty/non-empty change would also take focus from the
+        // quick-add field, which lives in the list's safe-area inset.
+        .id(rowsLatch.identity(isEmpty: sections.isEmpty))
         .overlay {
             if model.loadedOnce && sections.isEmpty {
                 if model.search.trimmingCharacters(in: .whitespaces).isEmpty {
