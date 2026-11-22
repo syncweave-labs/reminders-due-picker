@@ -160,7 +160,8 @@ static func fetchIncompleteReminders(store: EKEventStore, calendars: [EKCalendar
         semaphore.signal()
     }
 
-    _ = semaphore.wait(timeout: .now() + 120)
+    // A timed-out fetch must not read as "no reminders".
+    guard semaphore.wait(timeout: .now() + 120) == .success else { fail("Timed out reading Reminders.") }
     return fetched
 }
 
@@ -174,7 +175,8 @@ static func fetchCompletedReminders(store: EKEventStore, calendars: [EKCalendar]
         semaphore.signal()
     }
 
-    _ = semaphore.wait(timeout: .now() + 120)
+    // A timed-out fetch must not read as "no reminders".
+    guard semaphore.wait(timeout: .now() + 120) == .success else { fail("Timed out reading Reminders.") }
     return fetched
 }
 

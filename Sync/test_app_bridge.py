@@ -229,6 +229,27 @@ class U09BridgeTests(unittest.TestCase):
             # The conflict stays open because nothing was applied.
             self.assertIn(rec["conflict_id"], {r["conflict_id"] for r in ui.ConflictJournal(tmp / "Conflicts").records()})
 
+    def test_conflict_apply_holds_the_sync_lock(self):
+        with tempfile.TemporaryDirectory() as t:
+            tmp = Path(t)
+            config = self._config(tmp)
+            engine.write_json_atomic(tmp / "state.json", {"account_binding": {"version": 1, "apple": "a", "google": "g"}})
+            import sync_ui_support as ui
+            reminder = {"id": "u1", "stable_id": "u1", "list_title": "Work", "title": "R", "modified_at": "m"}
+            task = {"id": "g1", "title": "R2", "etag": "e1"}
+            rec = ui.build_conflict_record({"apple": "a", "google": "g"}, "Work", "u1", reminder, task)
+            ui.ConflictJournal(tmp / "Conflicts").observe(rec)
+            free = []
+            def export(*_args, **_kwargs):
+                # A worker cycle would try the lock without waiting.
+                with engine.sync_lock(config, wait=False) as acquired:
+                    free.append(acquired)
+                return [reminder]
+            with patch.object(engine, "run_reminders_export", side_effect=export):
+                bridge.conflict_apply(config, tmp, {"conflict_id": rec["conflict_id"], "choice": "google",
+                                                    "expected_revision": {}, "operation_id": "op-lock"})
+            self.assertEqual(free, [False])
+
     def test_conflict_list_returns_counts_and_records(self):
         with tempfile.TemporaryDirectory() as t:
             tmp = Path(t)

@@ -239,19 +239,22 @@ def conflict_apply(config, data_dir, payload):
         # destructive approval, which resolve_conflict surfaces unchanged.
         return _apply_conflict_choice(config, context)
 
-    return ui.resolve_conflict(
-        config,
-        journal,
-        resolutions,
-        str(payload.get("conflict_id") or ""),
-        str(payload.get("choice") or ""),
-        payload.get("expected_revision") or {},
-        operation_id=str(payload.get("operation_id") or ""),
-        read_apple=read_apple,
-        read_google=read_google,
-        apply_change=apply_change,
-        account_binding=binding,
-    )
+    # The worker's cycle rewrites the same journal and Reminders; re-read and
+    # write under its lock, as policy_save does.
+    with engine.sync_lock(config, wait=True):
+        return ui.resolve_conflict(
+            config,
+            journal,
+            resolutions,
+            str(payload.get("conflict_id") or ""),
+            str(payload.get("choice") or ""),
+            payload.get("expected_revision") or {},
+            operation_id=str(payload.get("operation_id") or ""),
+            read_apple=read_apple,
+            read_google=read_google,
+            apply_change=apply_change,
+            account_binding=binding,
+        )
 
 
 def _reminder_uid(config, reminder):
