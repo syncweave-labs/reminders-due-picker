@@ -5021,7 +5021,9 @@ def record_conflicts_for_review(
     """
     try:
         import sync_ui_support as ui
-
+    except ImportError:
+        return  # standalone install: the review journal belongs to the app
+    try:
         directory = expand_path(config["status_path"]).parent / "Conflicts"
         journal = ui.ConflictJournal(directory)
         observed: set[str] = set()

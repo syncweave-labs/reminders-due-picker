@@ -15,6 +15,15 @@ fi
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/due-picker-tests.XXXXXX")"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
+# The bundled engine is the standalone reminders-task-bridge engine, byte for
+# byte; Sync/ORIGIN.md pins its commit and sha256. Change it there first.
+ENGINE_EXPECTED="$(sed -n 's/^Engine sha256: `\([0-9a-f]\{64\}\)`$/\1/p' "${PROJECT_DIR}/Sync/ORIGIN.md")"
+ENGINE_ACTUAL="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "${PROJECT_DIR}/Sync/icloud_reminders_google_sync.py")"
+if [ -z "$ENGINE_EXPECTED" ] || [ "$ENGINE_EXPECTED" != "$ENGINE_ACTUAL" ]; then
+  printf 'ERROR: Sync/icloud_reminders_google_sync.py does not match the engine pinned in Sync/ORIGIN.md.\n' >&2
+  exit 1
+fi
+
 SYNC_PYTHON="${SYNC_PYTHON:-$(command -v python3)}"
 if [ -x /opt/homebrew/bin/python3 ]; then SYNC_PYTHON=/opt/homebrew/bin/python3; fi
 (cd "${PROJECT_DIR}/Sync" && "$SYNC_PYTHON" -B -m unittest test_icloud_reminders_google_sync.py test_app_bridge.py test_sync_ui_support.py)
