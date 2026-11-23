@@ -46,6 +46,7 @@ enum AppTests {
         await manageModelTests(check, calendar)
         manageEventKitTests(check, calendar)
         loginAgentTests(check)
+        workerBackoffTests(check)
         notionStatusTests(check)
         privateLogTests(check)
         print("App tests: \(check.passed) passed, \(check.failed) failed")
@@ -587,6 +588,36 @@ enum AppTests {
     }
 
     // MARK: Login-agent self-heal (injected directory)
+
+    @MainActor
+    static func workerBackoffTests(_ check: Checker) {
+        let t0 = Date(timeIntervalSince1970: 1_000_000)
+        var backoff = WorkerBackoff()
+        check.expect(backoff.mayStart(t0) && !backoff.failing, "fresh backoff starts at once")
+        backoff.started(t0)
+        backoff.ended(crashed: true, t0.addingTimeInterval(1))
+        check.expect(backoff.failing, "a crash at start is a failure")
+        check.expect(!backoff.mayStart(t0.addingTimeInterval(3)), "no restart on the next 2 s tick")
+        check.expect(backoff.mayStart(t0.addingTimeInterval(6)), "first retry after 5 s")
+        backoff.started(t0.addingTimeInterval(6))
+        backoff.ended(crashed: true, t0.addingTimeInterval(7))
+        check.expect(!backoff.mayStart(t0.addingTimeInterval(16)), "second retry waits longer")
+        check.expect(backoff.mayStart(t0.addingTimeInterval(17)), "second retry after 10 s")
+        for i in 0..<20 {
+            let at = t0.addingTimeInterval(Double(100 + i * 1000))
+            backoff.started(at); backoff.ended(crashed: true, at.addingTimeInterval(1))
+        }
+        check.equal(backoff.retryAt.timeIntervalSince(t0.addingTimeInterval(Double(100 + 19 * 1000 + 1))), 300, "delay capped at 5 min")
+        let later = t0.addingTimeInterval(100_000)
+        backoff.started(later)
+        backoff.tick(later.addingTimeInterval(61))
+        check.expect(!backoff.failing, "a worker that keeps running clears the failure")
+        backoff.ended(crashed: false, later.addingTimeInterval(62))
+        check.expect(backoff.mayStart(later.addingTimeInterval(62)), "a clean stop does not delay the next start")
+        var long = WorkerBackoff()
+        long.started(t0); long.ended(crashed: true, t0.addingTimeInterval(3600))
+        check.expect(!long.failing, "a crash after long healthy running restarts at once")
+    }
 
     @MainActor
     static func loginAgentTests(_ check: Checker) {

@@ -62,6 +62,35 @@ enum LoginAgent {
     }
 }
 
+/// Restart policy for the sync worker. A worker that dies soon after starting
+/// (e.g. a corrupt config.json) is retried with a growing delay instead of
+/// every timer tick, and the app shows the failure instead of a stale status.
+struct WorkerBackoff {
+    static let healthyAfter: TimeInterval = 60
+    private(set) var failures = 0
+    private(set) var retryAt = Date.distantPast
+    private var startedAt: Date?
+
+    var failing: Bool { failures > 0 }
+    func mayStart(_ now: Date) -> Bool { now >= retryAt }
+
+    mutating func started(_ now: Date) { startedAt = now }
+
+    /// A worker that has run for a while has proved its configuration.
+    mutating func tick(_ now: Date) {
+        if let startedAt, now.timeIntervalSince(startedAt) >= Self.healthyAfter { failures = 0 }
+    }
+
+    /// `crashed` is a non-zero exit or a signal other than our own SIGTERM.
+    mutating func ended(crashed: Bool, _ now: Date) {
+        let ran = startedAt.map { now.timeIntervalSince($0) } ?? 0
+        startedAt = nil
+        guard crashed, ran < Self.healthyAfter else { failures = 0; retryAt = .distantPast; return }
+        failures += 1
+        retryAt = now.addingTimeInterval(min(5 * pow(2, Double(failures - 1)), 300))
+    }
+}
+
 /// Read-only view of the Planner Mac bridge's Notion mirror state. The bridge
 /// (`io.codex.planner-reminders-bridge`) writes this file every ~60 s from this
 /// app's `--sync-export`; the app only ever reads three fields from it and
