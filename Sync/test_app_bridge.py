@@ -272,7 +272,8 @@ class U09BridgeTests(unittest.TestCase):
             with patch.object(engine, "run_reminders_export", side_effect=export):
                 bridge.conflict_apply(config, tmp, {"conflict_id": rec["conflict_id"], "choice": "google",
                                                     "expected_revision": {}, "operation_id": "op-lock"})
-            self.assertEqual(free, [False])
+            self.assertTrue(free)
+            self.assertNotIn(True, free)
 
     def test_apple_choice_writes_google_and_the_conflict_does_not_return(self):
         with tempfile.TemporaryDirectory() as t:
@@ -350,6 +351,48 @@ class U09BridgeTests(unittest.TestCase):
             self.assertEqual(result["state"], "failed")
             self.assertEqual(len(ui.ConflictJournal(tmp / "Conflicts").records()), 1)
             self.assertEqual(engine.read_json(tmp / "state.json"), state)
+
+    def _completed_conflict(self, tmp, mapped):
+        import sync_ui_support as ui
+        config = self._config(tmp)
+        binding = {"version": 1, "apple": "a", "google": "g"}
+        apple = {"id": "r1", "stable_id": "r1", "list_title": "Work", "title": "A", "notes": "",
+                 "is_completed": True, "modified_at": "m1"}
+        uid = engine.reminder_uid(apple)
+        google = {"id": "t1", "title": "G", "etag": "e1", "status": "needsAction"}
+        state = {"version": 1, "events": {}, "tasks": {}, "account_binding": binding}
+        if mapped:
+            engine.save_task_state(state, "list1", uid, google, "d0", "A", apple, config, "Work")
+        engine.write_json_atomic(tmp / "state.json", state)
+        rec = ui.build_conflict_record(binding, "Work", uid, apple, google)
+        ui.ConflictJournal(tmp / "Conflicts").observe(rec)
+        payload = {"conflict_id": rec["conflict_id"], "choice": "google", "operation_id": "op-" + str(mapped),
+                   "expected_revision": {"apple": "m1", "google": "e1"}}
+        return config, apple, google, payload
+
+    def test_conflict_on_a_completed_reminder_is_found(self):
+        with tempfile.TemporaryDirectory() as t:
+            tmp = Path(t)
+            config, apple, google, payload = self._completed_conflict(tmp, mapped=True)
+            export = lambda _config, completed_only=False: [apple] if completed_only else []
+            with patch.object(engine, "run_reminders_export", side_effect=export), \
+                 patch.object(engine, "GoogleTasksClient", return_value=FakeTasks(google)), \
+                 patch.object(engine, "run_reminders_apply", return_value=[{"status": "updated"}]) as apply:
+                result = bridge.conflict_apply(config, tmp, payload)
+            self.assertEqual(result["state"], "resolved", result)
+            self.assertTrue(apply.called)
+
+    def test_conflict_without_a_task_mapping_says_so(self):
+        with tempfile.TemporaryDirectory() as t:
+            tmp = Path(t)
+            config, apple, google, payload = self._completed_conflict(tmp, mapped=False)
+            import sync_ui_support as ui
+            with patch.object(engine, "run_reminders_export", return_value=[apple]), \
+                 patch.object(engine, "GoogleTasksClient", return_value=FakeTasks(google)):
+                result = bridge.conflict_apply(config, tmp, payload)
+            self.assertEqual(result["state"], "mapping_missing")
+            self.assertIn("직접 맞추면", result["message"])
+            self.assertEqual(len(ui.ConflictJournal(tmp / "Conflicts").records()), 1)
 
     def test_conflict_list_returns_counts_and_records(self):
         with tempfile.TemporaryDirectory() as t:

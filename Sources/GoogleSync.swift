@@ -30,6 +30,7 @@ final class GoogleSync: ObservableObject {
     private var operation: Process?
     private var timer: Timer?
     private var started = false
+    private var backoff = WorkerBackoff()
     private let demo: Bool
     let dataDirectory: URL
     private let label = "com.icloud-reminders-google-sync.due-picker.login"
@@ -65,8 +66,10 @@ final class GoogleSync: ObservableObject {
         if enabled { selfHealLoginAgent(); setEnabled(true) }
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             Task { @MainActor in
-                self?.readStatus()
-                if self?.enabled == true, self?.busy == false, self?.worker == nil { self?.startWorker() }
+                guard let self else { return }
+                self.backoff.tick(Date())
+                self.readStatus()
+                if self.enabled, !self.busy, self.worker == nil, self.backoff.mayStart(Date()) { self.startWorker() }
             }
         }
     }
@@ -146,13 +149,22 @@ final class GoogleSync: ObservableObject {
             process.standardOutput = log; process.standardError = log
             process.terminationHandler = { [weak self] ended in
                 try? log.close()
+                // Our own stop sends SIGTERM; the bridge turns it into a clean exit.
+                let crashed = ended.terminationReason == .exit ? ended.terminationStatus != 0
+                    : ended.terminationStatus != SIGTERM
                 Task { @MainActor in
-                    guard self?.worker === ended else { return }
-                    self?.worker = nil
+                    guard let self, self.worker === ended else { return }
+                    self.worker = nil
+                    self.backoff.ended(crashed: crashed, Date())
+                    if self.backoff.failing {
+                        self.state = "failed"
+                        self.message = "동기화 작업이 시작 직후 종료되었습니다. 설정(config.json)과 sync.log를 확인하세요. 잠시 뒤 다시 시도합니다."
+                    }
                 }
             }
             try process.run()
             worker = process
+            backoff.started(Date())
             state = "running"
         } catch { message = error.localizedDescription; state = "failed" }
     }
@@ -269,7 +281,7 @@ final class GoogleSync: ObservableObject {
     }
 
     private func readStatus() {
-        guard !demo, !busy else { return }
+        guard !demo, !busy, !backoff.failing else { return }
         if let data = try? Data(contentsOf: dataDirectory.appendingPathComponent("connection.json")),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             account = json["account_email"] as? String ?? ""
