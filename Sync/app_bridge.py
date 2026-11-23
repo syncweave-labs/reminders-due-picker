@@ -209,7 +209,22 @@ def conflict_list(config, data_dir):
 
 
 def conflict_apply(config, data_dir, payload):
-    """Apply one conflict choice via the engine's planner and destructive gate."""
+    """Apply one conflict choice via the engine's planner and destructive gate.
+
+    The worker's cycle rewrites the same journal, state and both sides, so
+    everything here runs under its lock, as policy_save does.
+    """
+    with engine.sync_lock(config, wait=True):
+        try:
+            return _conflict_apply_locked(config, data_dir, payload)
+        except (Exception, SystemExit) as exc:
+            # The conflict record stays; only a confirmed write removes it.
+            print(f"Conflict apply failed: {exc}", file=sys.stderr)
+            return {"ok": False, "state": "failed", "conflict_id": str(payload.get("conflict_id") or ""),
+                    "message": "적용하지 못했습니다. Google 연결과 미리알림 권한을 확인한 뒤 다시 시도하세요."}
+
+
+def _conflict_apply_locked(config, data_dir, payload):
     import sync_ui_support as ui
 
     directory = data_dir / "Conflicts"
@@ -217,57 +232,65 @@ def conflict_apply(config, data_dir, payload):
     resolutions = ui.ConflictResolutionJournal(directory / "Resolutions")
     state = engine.load_state(Path(config["state_path"]))
     binding = state.get("account_binding") if isinstance(state.get("account_binding"), dict) else {}
+    clients = []
+
+    def client():
+        if not clients:
+            # Refuse a token for another Google account, as a sync cycle does.
+            config["_expected_google_credential_binding"] = str(binding.get("google") or "")
+            clients.append(engine.GoogleTasksClient(config))
+        return clients[0]
 
     def read_apple(list_title, uid):
         for reminder in engine.run_reminders_export(config):
-            if str(reminder.get("list_title") or "") == list_title and _reminder_uid(config, reminder) == uid:
+            if str(reminder.get("list_title") or "") == list_title and engine.reminder_uid(reminder) == uid:
                 return reminder
         return None
 
     def read_google(list_title, uid):
-        # The engine owns live Google reads; without a live client this returns
-        # the last-observed RAW task from the record so an offline call still
-        # compares revisions deterministically. A client-backed reader can
-        # replace this when a connection exists.
-        record = next((r for r in journal.records() if r.get("conflict_id") == payload.get("conflict_id")), None)
-        return (record or {}).get("google_raw")
+        record = _task_record(state, list_title, uid)
+        try:
+            return client().get_task(record["tasklist_id"], record["task_id"])
+        except engine.GoogleApiError as exc:
+            if exc.status in (404, 410):
+                return None
+            raise
 
     def apply_change(context):
-        # Route the single chosen write through the engine's mutation planner
-        # and destructive-approval gate, then perform exactly that write. The
-        # gate raises MutationPlanApprovalRequired when the change would need a
-        # destructive approval, which resolve_conflict surfaces unchanged.
-        return _apply_conflict_choice(config, context)
+        return _apply_conflict_choice(config, state, client, context)
 
-    # The worker's cycle rewrites the same journal and Reminders; re-read and
-    # write under its lock, as policy_save does.
-    with engine.sync_lock(config, wait=True):
-        return ui.resolve_conflict(
-            config,
-            journal,
-            resolutions,
-            str(payload.get("conflict_id") or ""),
-            str(payload.get("choice") or ""),
-            payload.get("expected_revision") or {},
-            operation_id=str(payload.get("operation_id") or ""),
-            read_apple=read_apple,
-            read_google=read_google,
-            apply_change=apply_change,
-            account_binding=binding,
-        )
+    return ui.resolve_conflict(
+        config,
+        journal,
+        resolutions,
+        str(payload.get("conflict_id") or ""),
+        str(payload.get("choice") or ""),
+        payload.get("expected_revision") or {},
+        operation_id=str(payload.get("operation_id") or ""),
+        read_apple=read_apple,
+        read_google=read_google,
+        apply_change=apply_change,
+        account_binding=binding,
+    )
 
 
-def _reminder_uid(config, reminder):
-    return reminder.get("stable_id") or reminder.get("external_id") or reminder.get("id") or ""
+def _task_record(state, list_title, uid):
+    """The engine's mapping for this reminder: which Google task it syncs to."""
+    for key, record in state.get("tasks", {}).items():
+        if (isinstance(record, dict) and key.split(":", 1)[-1] == uid
+                and str(record.get("tasklist_title") or "") == list_title
+                and record.get("tasklist_id") and record.get("task_id")):
+            return record
+    raise LookupError("No synced Google task is recorded for this reminder.")
 
 
-def _apply_conflict_choice(config, context):
+def _apply_conflict_choice(config, state, client, context):
     """Build a single-action plan, enforce the gate, then apply the one write.
 
     choice=="google" writes the Google side onto Apple Reminders (a completion
-    is destructive and must pass the gate). choice=="apple" leaves Apple as the
-    authority and patches the Google task; a Google completion/deletion is
-    equally gated.
+    is destructive and must pass the gate). choice=="apple" patches the Google
+    task with the Apple reminder and records it in state the way a normal sync
+    does, so the next cycle sees both sides in step.
     """
     choice = context["choice"]
     list_title = context["list_title"]
@@ -296,10 +319,15 @@ def _apply_conflict_choice(config, context):
     )
     plan = engine.build_mutation_plan([action], population=1)
     engine.enforce_mutation_plan(config, plan, dry_run=False)
-    # Without a live Google client here the engine's next normal sync applies
-    # the Apple-authoritative value; we record the intent and let the loop push
-    # it. Returning the gated plan proves the destructive gate ran.
-    return {"side": "google", "planned": plan["fingerprint"]}
+    built_uid, body, digest = engine.build_task(reminder, config)
+    if built_uid != uid:
+        raise LookupError("Reminder identity changed; refusing to write.")
+    record = _task_record(state, list_title, uid)
+    patched = client().patch_task(record["tasklist_id"], record["task_id"], engine.task_body_for_patch(body, task))
+    engine.save_task_state(state, record["tasklist_id"], uid, patched, digest,
+                           str(body.get("title") or uid), reminder, config, list_title)
+    engine.write_json_atomic(Path(config["state_path"]), state)
+    return {"side": "google", "task_id": str(patched.get("id") or "")}
 
 
 def main():
