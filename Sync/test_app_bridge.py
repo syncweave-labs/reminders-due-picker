@@ -145,6 +145,25 @@ bridge.loop(argparse.Namespace(config=__import__('sys').argv[1]))
             self.assertFalse(engine.read_json(folder / "config.json")["use_adc"])
 
 
+class FakeTasks:
+    """Stands in for engine.GoogleTasksClient; never reaches Google."""
+
+    def __init__(self, task, fail_patch=False):
+        self.task = dict(task)
+        self.patches = []
+        self.fail_patch = fail_patch
+
+    def get_task(self, tasklist_id, task_id):
+        return dict(self.task)
+
+    def patch_task(self, tasklist_id, task_id, body):
+        self.patches.append((tasklist_id, task_id, body))
+        if self.fail_patch:
+            raise engine.GoogleApiError(500, "boom")
+        self.task = {**self.task, **body, "etag": f"e{len(self.patches) + 1}"}
+        return dict(self.task)
+
+
 class U09BridgeTests(unittest.TestCase):
     """U09 policy and conflict IPC: narrow actions, no arbitrary paths/keys,
     worker-stop/lock contract, planner-routed resolution with the gate."""
@@ -207,8 +226,12 @@ class U09BridgeTests(unittest.TestCase):
             # A completed Google task -> writing it to Apple is a completion =
             # destructive, so the (tight) gate must block it, not bypass it.
             task = {"id": "g1", "title": "R2", "notes": "", "due": "2026-10-22T00:00:00Z", "status": "completed", "etag": "e1"}
+            uid = engine.reminder_uid(reminder)
+            state = {"account_binding": {"version": 1, "apple": "a", "google": "g"}}
+            engine.save_task_state(state, "list1", uid, task, "d0", "R", reminder, config, "Work")
+            engine.write_json_atomic(tmp / "state.json", state)
             journal = ui.ConflictJournal(tmp / "Conflicts")
-            rec = ui.build_conflict_record({"apple": "a", "google": "g"}, "Work", "u1", reminder, task)
+            rec = ui.build_conflict_record({"apple": "a", "google": "g"}, "Work", uid, reminder, task)
             journal.observe(rec)
 
             enforce_calls = []
@@ -217,6 +240,7 @@ class U09BridgeTests(unittest.TestCase):
                 enforce_calls.append(plan)
                 return real_enforce(cfg, plan, **kw)
             with patch.object(engine, "run_reminders_export", return_value=[reminder]), \
+                 patch.object(engine, "GoogleTasksClient", return_value=FakeTasks(task)), \
                  patch.object(engine, "enforce_mutation_plan", side_effect=spy_enforce), \
                  patch.object(engine, "write_sync_status"):
                 payload = {"conflict_id": rec["conflict_id"], "choice": "google",
@@ -249,6 +273,83 @@ class U09BridgeTests(unittest.TestCase):
                 bridge.conflict_apply(config, tmp, {"conflict_id": rec["conflict_id"], "choice": "google",
                                                     "expected_revision": {}, "operation_id": "op-lock"})
             self.assertEqual(free, [False])
+
+    def test_apple_choice_writes_google_and_the_conflict_does_not_return(self):
+        with tempfile.TemporaryDirectory() as t:
+            tmp = Path(t)
+            config = self._config(tmp)
+            import sync_ui_support as ui
+            binding = {"version": 1, "apple": "a", "google": "g"}
+            base = {"id": "r1", "stable_id": "r1", "external_id": "r1", "account_id": "acc", "list_id": "L",
+                    "list_title": "Work", "notes": "", "due_date": "2026-10-20", "all_day": True,
+                    "due_at": "2026-10-20T00:00:00Z", "is_completed": False}
+            before = {**base, "title": "Old", "modified_at": "2026-10-20T09:00:00Z"}
+            uid, body, digest = engine.build_task(before, config)
+            synced = {**body, "id": "t1", "etag": "e0"}
+            state = {"version": 1, "events": {}, "tasks": {}, "account_binding": binding}
+            engine.save_task_state(state, "list1", uid, synced, digest, "Old", before, config, "Work")
+            engine.write_json_atomic(tmp / "state.json", state)
+            # Both sides changed since the last sync.
+            apple = {**base, "title": "Apple edit", "modified_at": "2026-10-21T09:00:00Z"}
+            google = {**synced, "title": "Google edit", "etag": "e1"}
+
+            def plan(current_state, task):
+                _, b, d = engine.build_task(apple, config)
+                return engine.plan_google_task_changes_to_reminders(
+                    config, {"Work": {uid: (b, d, apple)}}, {"Work": "list1"},
+                    {"Work": {uid: task}}, {"Work": [task]}, {"Work": []}, current_state, allow_deletes=False)
+
+            first = plan(engine.load_state(tmp / "state.json"), google)
+            self.assertEqual(len(first["conflict_records"]), 1)
+            rec = ui.build_conflict_record(binding, "Work", uid, apple, google)
+            ui.ConflictJournal(tmp / "Conflicts").observe(rec)
+
+            fake = FakeTasks(google)
+            with patch.object(engine, "run_reminders_export", return_value=[apple]), \
+                 patch.object(engine, "GoogleTasksClient", return_value=fake):
+                result = bridge.conflict_apply(config, tmp, {
+                    "conflict_id": rec["conflict_id"], "choice": "apple", "operation_id": "op-apple",
+                    "expected_revision": {"apple": apple["modified_at"], "google": "e1"}})
+
+            self.assertEqual(result["state"], "resolved", result)
+            self.assertEqual([call[:2] for call in fake.patches], [("list1", "t1")])
+            self.assertEqual(fake.task["title"], "Apple edit")
+            self.assertEqual(ui.ConflictJournal(tmp / "Conflicts").records(), [])
+            again = plan(engine.load_state(tmp / "state.json"), fake.task)
+            self.assertEqual(again["conflict_records"], [])
+            self.assertEqual(again["operations"], [])
+            self.assertEqual(again["google_patches"], [])
+            _, b, d = engine.build_task(apple, config)
+            outbound = engine.plan_google_task_outbound_mutations(
+                config, {"Work": {uid: (b, d, apple)}}, {"Work": "list1"}, {"Work": {uid: fake.task}},
+                {"Work": {}}, {"Work": {}}, {"Work": {"t1": fake.task}}, {"Work": []},
+                engine.load_state(tmp / "state.json"), set(), {}, allow_deletes=False)
+            self.assertEqual(outbound, [])
+
+    def test_apple_choice_keeps_the_conflict_when_the_google_write_fails(self):
+        with tempfile.TemporaryDirectory() as t:
+            tmp = Path(t)
+            config = self._config(tmp)
+            import sync_ui_support as ui
+            binding = {"version": 1, "apple": "a", "google": "g"}
+            apple = {"id": "r1", "stable_id": "r1", "list_title": "Work", "title": "A", "notes": "",
+                     "is_completed": False, "modified_at": "m1"}
+            uid = engine.reminder_uid(apple)
+            google = {"id": "t1", "title": "G", "etag": "e1", "status": "needsAction"}
+            state = {"version": 1, "events": {}, "tasks": {}, "account_binding": binding}
+            engine.save_task_state(state, "list1", uid, google, "d0", "A", apple, config, "Work")
+            engine.write_json_atomic(tmp / "state.json", state)
+            rec = ui.build_conflict_record(binding, "Work", uid, apple, google)
+            ui.ConflictJournal(tmp / "Conflicts").observe(rec)
+            fake = FakeTasks(google, fail_patch=True)
+            with patch.object(engine, "run_reminders_export", return_value=[apple]), \
+                 patch.object(engine, "GoogleTasksClient", return_value=fake):
+                result = bridge.conflict_apply(config, tmp, {
+                    "conflict_id": rec["conflict_id"], "choice": "apple", "operation_id": "op-fail",
+                    "expected_revision": {"apple": "m1", "google": "e1"}})
+            self.assertEqual(result["state"], "failed")
+            self.assertEqual(len(ui.ConflictJournal(tmp / "Conflicts").records()), 1)
+            self.assertEqual(engine.read_json(tmp / "state.json"), state)
 
     def test_conflict_list_returns_counts_and_records(self):
         with tempfile.TemporaryDirectory() as t:
