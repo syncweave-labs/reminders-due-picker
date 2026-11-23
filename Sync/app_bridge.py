@@ -217,6 +217,10 @@ def conflict_apply(config, data_dir, payload):
     with engine.sync_lock(config, wait=True):
         try:
             return _conflict_apply_locked(config, data_dir, payload)
+        except MappingMissing:
+            return {"ok": False, "state": "mapping_missing", "conflict_id": str(payload.get("conflict_id") or ""),
+                    "message": "이 항목은 Google Task와 연결된 동기화 기록이 없어 여기서 적용할 수 없습니다. "
+                               "미리알림이나 Google Tasks에서 두 쪽을 같은 상태로 직접 맞추면 다음 동기화에서 정리됩니다."}
         except (Exception, SystemExit) as exc:
             # The conflict record stays; only a confirmed write removes it.
             print(f"Conflict apply failed: {exc}", file=sys.stderr)
@@ -242,9 +246,11 @@ def _conflict_apply_locked(config, data_dir, payload):
         return clients[0]
 
     def read_apple(list_title, uid):
-        for reminder in engine.run_reminders_export(config):
-            if str(reminder.get("list_title") or "") == list_title and engine.reminder_uid(reminder) == uid:
-                return reminder
+        # A conflict can be on a completed reminder, which the default export omits.
+        for completed_only in (False, True):
+            for reminder in engine.run_reminders_export(config, completed_only=completed_only):
+                if str(reminder.get("list_title") or "") == list_title and engine.reminder_uid(reminder) == uid:
+                    return reminder
         return None
 
     def read_google(list_title, uid):
@@ -274,6 +280,10 @@ def _conflict_apply_locked(config, data_dir, payload):
     )
 
 
+class MappingMissing(LookupError):
+    pass
+
+
 def _task_record(state, list_title, uid):
     """The engine's mapping for this reminder: which Google task it syncs to."""
     for key, record in state.get("tasks", {}).items():
@@ -281,7 +291,7 @@ def _task_record(state, list_title, uid):
                 and str(record.get("tasklist_title") or "") == list_title
                 and record.get("tasklist_id") and record.get("task_id")):
             return record
-    raise LookupError("No synced Google task is recorded for this reminder.")
+    raise MappingMissing("No synced Google task is recorded for this reminder.")
 
 
 def _apply_conflict_choice(config, state, client, context):
